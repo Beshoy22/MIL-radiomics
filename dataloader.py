@@ -108,13 +108,16 @@ class PatchEmbeddingsDataset(Dataset):
             features = self.transform(features)
         
         # Convert to torch tensors
-        features = torch.tensor(features, dtype=torch.float32)
+        if not isinstance(features, torch.Tensor):
+            features = torch.tensor(features, dtype=torch.float32)
+        else:
+            features = features.float()
         
-        # Check if we need to transpose features
-        # We want shape [n_patches, feature_dim] for the transformer
-        if features.dim() == 2 and features.shape[0] < features.shape[1]:
+        # Explicitly check and transpose if necessary to ensure [n_patches, feature_dim] format
+        # If features has shape [feature_dim, n_patches] where feature_dim is 512
+        if features.dim() == 2 and features.shape[0] == 512:
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
-            
+                
         label = torch.tensor(item['label'], dtype=torch.long)
         
         return features, label
@@ -285,6 +288,7 @@ class SplitDataset(Dataset):
     def __len__(self):
         return len(self.data)
     
+    # Update the __getitem__ method in SplitDataset class
     def __getitem__(self, idx):
         item = self.data[idx]
         features = item['features']
@@ -292,7 +296,7 @@ class SplitDataset(Dataset):
         if self.transform:
             features = self.transform(features)
         
-        # Convert to torch tensors - handle both numpy arrays and tensors
+        # Convert to torch tensors
         if not isinstance(features, torch.Tensor):
             try:
                 # First ensure features is a numpy array to handle list-of-lists or other formats
@@ -306,16 +310,17 @@ class SplitDataset(Dataset):
             # Ensure correct data type if already a tensor
             features = features.float()
         
-        # Check if we need to transpose features - consistent format is [n_patches, feature_dim]
-        if features.dim() == 2 and features.shape[0] < features.shape[1]:
-            # If feature_dim > n_patches, we need to transpose
+        # IMPORTANT: Check and transpose if necessary to ensure [n_patches, feature_dim] format
+        # If features has shape [feature_dim, n_patches], transpose it
+        if features.dim() == 2 and features.shape[0] == 512:  # 512 is the feature_dim
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
-            
+                
         label = torch.tensor(item['label'], dtype=torch.long)
         
         return features, label
 
 
+# Update the collate_fn function
 def collate_fn(batch):
     """
     Custom collate function to handle variable number of patches.
@@ -330,23 +335,31 @@ def collate_fn(batch):
     features = [item[0] for item in batch]
     labels = [item[1] for item in batch]
     
-    # Print shapes for debugging
+    # For debugging (can be removed in production)
     feature_shapes = [f.shape for f in features]
     print(f"Feature shapes in batch: {feature_shapes}")
     
-    # Ensure all features have the same dimensionality structure
+    # Ensure all features have the same dimensionality structure - should be [n_patches, feature_dim]
     processed_features = []
     for f in features:
-        # Handle the case where features are [feature_dim, n_patches]
-        if f.dim() == 2 and f.shape[0] < f.shape[1]:
-            # Transpose to [n_patches, feature_dim]
-            processed_features.append(f.transpose(0, 1))
-        # Handle the case where features are already [n_patches, feature_dim]
-        elif f.dim() == 2:
-            processed_features.append(f)
-        # Handle unexpected dimensionality
+        # Explicitly check for the case where features are still in [feature_dim, n_patches] format
+        if f.dim() == 2 and f.shape[1] == 512:  # If the second dimension is 512 (feature_dim)
+            processed_features.append(f)  # Already in correct format
+        elif f.dim() == 2 and f.shape[0] == 512:  # If features are [feature_dim, n_patches]
+            processed_features.append(f.transpose(0, 1))  # Transpose to [n_patches, feature_dim]
         else:
-            raise ValueError(f"Unexpected feature shape: {f.shape}. Expected 2D tensor.")
+            # For any other case, ensure it's in correct shape
+            if f.dim() == 2:
+                # Check which dimension is likely to be feature_dim 
+                # (assume the dimension closer to 512 is the feature dimension)
+                if abs(f.shape[0] - 512) < abs(f.shape[1] - 512):
+                    # First dimension is likely feature_dim
+                    processed_features.append(f.transpose(0, 1))
+                else:
+                    # Second dimension is likely feature_dim
+                    processed_features.append(f)
+            else:
+                raise ValueError(f"Unexpected feature shape: {f.shape}. Expected 2D tensor.")
     
     # Get the dimensions for padding
     max_patches = max(f.shape[0] for f in processed_features)
@@ -376,7 +389,6 @@ def collate_fn(batch):
         # More detailed error message
         shapes = [pf.shape for pf in padded_features]
         raise RuntimeError(f"Failed to stack tensors with shapes: {shapes}. Original error: {e}")
-
 
 
 def create_weighted_sampler(labels, oversample_factor=1.0):
