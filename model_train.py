@@ -41,7 +41,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         'train_loss': [],
         'val_loss': [],
         'train_acc': [],
-        'val_acc': []
+        'val_acc': [],
+        'val_f1_macro': [],   # Added F1 Macro tracking
+        'val_f1_weighted': [] # Added F1 Weighted tracking
     }
     
     start_time = time.time()
@@ -93,6 +95,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         val_loss = 0.0
         val_correct = 0
         val_total = 0
+        all_val_labels = []
+        all_val_preds = []
         
         # Use tqdm for progress bar
         val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
@@ -109,14 +113,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 val_correct += (predicted == labels).sum().item()
                 val_total += labels.size(0)
                 
+                # Collect labels and predictions for F1 calculation
+                all_val_labels.extend(labels.cpu().numpy())
+                all_val_preds.extend(predicted.cpu().numpy())
+                
                 # Update progress bar
                 val_loader_tqdm.set_postfix(
                     loss=f"{loss.item():.4f}", 
                     acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
                 )
         
+        # Calculate validation metrics
         val_loss = val_loss / len(val_loader.dataset)
         val_acc = 100 * val_correct / val_total
+        
+        # Calculate F1 scores
+        val_f1_macro = f1_score(all_val_labels, all_val_preds, average='macro', zero_division=0)
+        val_f1_weighted = f1_score(all_val_labels, all_val_preds, average='weighted', zero_division=0)
         
         # Update learning rate
         if scheduler is not None:
@@ -130,15 +143,18 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         history['val_loss'].append(val_loss)
         history['train_acc'].append(train_acc)
         history['val_acc'].append(val_acc)
+        history['val_f1_macro'].append(val_f1_macro)
+        history['val_f1_weighted'].append(val_f1_weighted)
         
         # Calculate time elapsed
         epoch_time = time.time() - epoch_start_time
         total_time = time.time() - start_time
         
-        # Print progress
+        # Print progress with F1 scores
         print(f'Epoch {epoch+1}/{num_epochs} | '
               f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | '
               f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | '
+              f'F1 Macro: {val_f1_macro:.4f} | F1 Weighted: {val_f1_weighted:.4f} | '
               f'Time: {epoch_time:.1f}s | Total: {total_time/60:.1f}m')
         
         # Check for improvement
@@ -221,6 +237,10 @@ def evaluate_model(model, test_loader, criterion=None,
     recall = recall_score(all_labels, all_preds, zero_division=0)
     f1 = f1_score(all_labels, all_preds, zero_division=0)
     
+    # Added F1 Macro and F1 Weighted calculations
+    f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    
     try:
         auc = roc_auc_score(all_labels, all_probs)
     except:
@@ -234,6 +254,8 @@ def evaluate_model(model, test_loader, criterion=None,
         'precision': precision,
         'recall': recall,
         'f1': f1,
+        'f1_macro': f1_macro,     # Added F1 Macro
+        'f1_weighted': f1_weighted, # Added F1 Weighted
         'auc': auc,
         'confusion_matrix': cm,
         'all_labels': all_labels,
@@ -249,6 +271,8 @@ def evaluate_model(model, test_loader, criterion=None,
     print(f"  Precision: {precision:.4f}")
     print(f"  Recall: {recall:.4f}")
     print(f"  F1 Score: {f1:.4f}")
+    print(f"  F1 Macro: {f1_macro:.4f}")        # Added F1 Macro output
+    print(f"  F1 Weighted: {f1_weighted:.4f}")  # Added F1 Weighted output
     print(f"  AUC: {auc:.4f}")
     print(f"  Confusion Matrix:\n{cm}")
     

@@ -57,13 +57,19 @@ def save_model_and_results(model, metrics, history, output_dir):
     with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
         json.dump(metrics_json, f, indent=2)
     
-    # Save history
+    # Save history - updated to include F1 metrics if available
     history_json = {
         'train_loss': [float(v) for v in history['train_loss']],
         'val_loss': [float(v) for v in history['val_loss']],
         'train_acc': [float(v) for v in history['train_acc']],
         'val_acc': [float(v) for v in history['val_acc']]
     }
+    
+    # Add F1 scores if available
+    if 'val_f1_macro' in history:
+        history_json['val_f1_macro'] = [float(v) for v in history['val_f1_macro']]
+    if 'val_f1_weighted' in history:
+        history_json['val_f1_weighted'] = [float(v) for v in history['val_f1_weighted']]
     
     with open(os.path.join(output_dir, 'history.json'), 'w') as f:
         json.dump(history_json, f, indent=2)
@@ -106,10 +112,14 @@ def plot_training_curves(history, output_dir=None):
         history (dict): Training history
         output_dir (str, optional): Directory to save plots
     """
-    plt.figure(figsize=(12, 5))
+    # Determine number of plots needed - we need a third plot if F1 metrics are available
+    has_f1_metrics = 'val_f1_macro' in history
+    num_plots = 3 if has_f1_metrics else 2
+    
+    plt.figure(figsize=(15, 5 if has_f1_metrics else 10))
     
     # Plot loss
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, num_plots, 1)
     plt.plot(history['train_loss'], label='Train Loss')
     plt.plot(history['val_loss'], label='Validation Loss')
     plt.xlabel('Epoch')
@@ -119,7 +129,7 @@ def plot_training_curves(history, output_dir=None):
     plt.grid(True)
     
     # Plot accuracy
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, num_plots, 2)
     plt.plot(history['train_acc'], label='Train Accuracy')
     plt.plot(history['val_acc'], label='Validation Accuracy')
     plt.xlabel('Epoch')
@@ -127,6 +137,17 @@ def plot_training_curves(history, output_dir=None):
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
+    
+    # Plot F1 metrics if available
+    if has_f1_metrics:
+        plt.subplot(1, num_plots, 3)
+        plt.plot(history['val_f1_macro'], label='F1 Macro')
+        plt.plot(history['val_f1_weighted'], label='F1 Weighted')
+        plt.xlabel('Epoch')
+        plt.ylabel('F1 Score')
+        plt.title('Validation F1 Scores')
+        plt.legend()
+        plt.grid(True)
     
     plt.tight_layout()
     
