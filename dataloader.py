@@ -43,6 +43,7 @@ def compute_data_dir_checksum(data_dir):
 def process_pkl_file(pkl_file, endpoint):
     """
     Process a single .pkl file and extract instances with the specified endpoint.
+    Handles feature structure where features can be a list of tensors.
     
     Args:
         pkl_file (str): Path to the .pkl file
@@ -59,83 +60,119 @@ def process_pkl_file(pkl_file, endpoint):
             instances_list = pickle.load(f)
             center = os.path.basename(pkl_file)  # Use filename as center identifier
             
-            for idx, instance in enumerate(instances_list):
-                try:
-                    # Skip instances without the specified endpoint
-                    if endpoint not in instance:
-                        continue
-                    
-                    # Get features and ensure they're the right shape
-                    features = instance['features']
-                    
-                    # Convert features to torch tensor for manipulation
-                    if not isinstance(features, torch.Tensor):
-                        try:
-                            features = torch.tensor(features, dtype=torch.float32)
-                        except Exception as e:
-                            print(f"Warning: Could not convert features to tensor in {pkl_file}, instance {idx}: {e}")
-                            continue
-                    
-                    # Transpose if in [feature_dim, n_patches] format
-                    if features.dim() == 2 and features.shape[0] == 512:
-                        features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
-                    
-                    # Update max_patches
-                    n_patches = features.shape[0]
-                    max_patches = max(max_patches, n_patches)
-                    
-                    # Get label and handle different types carefully
-                    label_value = instance[endpoint]  # Get the specified endpoint
-                    
-                    # Handle different types of label values
-                    if isinstance(label_value, (int, bool, np.int32, np.int64)):
-                        # For simple types, convert directly
-                        label = 1 if label_value else 0
-                    elif isinstance(label_value, torch.Tensor):
-                        # For tensors, extract a single value if possible
-                        if label_value.numel() == 1:
-                            # Single element tensor
-                            label = 1 if label_value.item() else 0
-                        else:
-                            # Multi-element tensor, use the first element or skip
-                            print(f"Warning: Multi-element label tensor in {pkl_file}, instance {idx}. Using first element.")
-                            try:
-                                label = 1 if label_value[0].item() else 0
-                            except:
-                                print(f"Warning: Could not extract label from tensor. Skipping instance.")
-                                continue
-                    elif isinstance(label_value, np.ndarray):
-                        # For numpy arrays, similar approach as tensors
-                        if label_value.size == 1:
-                            label = 1 if label_value.item() else 0
-                        else:
-                            print(f"Warning: Multi-element label array in {pkl_file}, instance {idx}. Using first element.")
-                            try:
-                                label = 1 if label_value.flatten()[0] else 0
-                            except:
-                                print(f"Warning: Could not extract label from array. Skipping instance.")
-                                continue
-                    else:
-                        # For other types, use truthiness
-                        print(f"Warning: Unexpected label type {type(label_value)} in {pkl_file}, instance {idx}.")
-                        try:
-                            label = 1 if label_value else 0
-                        except:
-                            print(f"Warning: Could not convert label to binary. Skipping instance.")
-                            continue
-                    
-                    instances.append({
-                        'features': features,
-                        'label': label,
-                        'center': center
-                    })
-                except Exception as e:
-                    print(f"Error processing instance {idx} in {pkl_file}: {e}")
+            for instance in instances_list:
+                # Skip instances without the specified endpoint
+                if endpoint not in instance:
                     continue
                 
-        if not instances:
-            print(f"Warning: No valid instances found in {pkl_file}")
-            
+                # Get features - these can be a list of tensors
+                features = instance['features']
+                
+                # Handle different feature formats
+                if isinstance(features, list):
+                    # List of patch embeddings
+                    patch_count = len(features)
+                    
+                    # Process the patches to create a tensor of shape [n_patches, feature_dim]
+                    if patch_count > 0:
+                        # Check the type of the first patch
+                        if isinstance(features[0], torch.Tensor):
+                            # If the patches are already tensors, stack them
+                            try:
+                                processed_features = torch.stack(features)
+                            except:
+                                # If tensors have different shapes, try to convert each to same shape
+                                norm_features = []
+                                for feature in features:
+                                    # Ensure each feature has shape [512] or convert it
+                                    if feature.dim() == 1 and feature.shape[0] == 512:
+                                        norm_features.append(feature)
+                                    elif feature.dim() == 2:
+                                        # If it's 2D, take the first dimension if it's 512
+                                        if feature.shape[0] == 512:
+                                            norm_features.append(feature[0])
+                                        elif feature.shape[1] == 512:
+                                            norm_features.append(feature[0])
+                                        else:
+                                            # Skip this patch if we can't handle it
+                                            continue
+                                    else:
+                                        # Skip this patch if we can't handle it
+                                        continue
+                                
+                                if norm_features:
+                                    processed_features = torch.stack(norm_features)
+                                else:
+                                    # Skip this instance if no valid patches
+                                    continue
+                        elif isinstance(features[0], np.ndarray):
+                            # If the patches are numpy arrays, convert to tensors and stack
+                            try:
+                                processed_features = torch.tensor(np.stack(features), dtype=torch.float32)
+                            except:
+                                # Handle different shaped arrays
+                                norm_features = []
+                                for feature in features:
+                                    if feature.shape == (512,) or feature.shape == (1, 512):
+                                        norm_features.append(feature.reshape(512))
+                                    elif feature.shape == (512, 1):
+                                        norm_features.append(feature.reshape(512))
+                                    else:
+                                        # Skip this patch if we can't handle it
+                                        continue
+                                
+                                if norm_features:
+                                    processed_features = torch.tensor(np.stack(norm_features), dtype=torch.float32)
+                                else:
+                                    # Skip this instance if no valid patches
+                                    continue
+                        else:
+                            # Handle other types (e.g., lists of lists)
+                            try:
+                                # Try to convert to numpy array and then tensor
+                                processed_features = torch.tensor(np.array(features), dtype=torch.float32)
+                            except:
+                                print(f"Warning: Could not process features in {pkl_file}")
+                                continue
+                    else:
+                        # Skip instances with no patches
+                        continue
+                elif isinstance(features, torch.Tensor):
+                    # Already a tensor, just ensure correct shape
+                    processed_features = features
+                    
+                    # Transpose if in [feature_dim, n_patches] format
+                    if processed_features.dim() == 2 and processed_features.shape[0] == 512:
+                        processed_features = processed_features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                elif isinstance(features, np.ndarray):
+                    # Convert numpy array to tensor
+                    processed_features = torch.tensor(features, dtype=torch.float32)
+                    
+                    # Transpose if in [feature_dim, n_patches] format
+                    if processed_features.dim() == 2 and processed_features.shape[0] == 512:
+                        processed_features = processed_features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                else:
+                    # Skip instances with unsupported feature types
+                    print(f"Warning: Unsupported feature type {type(features)} in {pkl_file}")
+                    continue
+                
+                # Update max_patches
+                n_patches = processed_features.shape[0]
+                max_patches = max(max_patches, n_patches)
+                
+                # Get label
+                label = instance[endpoint]  # Get the specified endpoint
+                
+                # Convert to binary if not already
+                if not isinstance(label, int):
+                    label = 1 if label else 0
+                
+                instances.append({
+                    'features': processed_features,
+                    'label': label,
+                    'center': center
+                })
+                
         return max_patches, instances
     except Exception as e:
         print(f"Error processing {pkl_file}: {e}")
@@ -167,16 +204,25 @@ class CachedDataset(Dataset):
             if self.transform:
                 features = self.transform(features)
             
-            # Convert to torch tensors if not already
+            # Features should already be tensors from process_pkl_file function
+            # But handle any edge cases
             if not isinstance(features, torch.Tensor):
                 try:
-                    features = torch.tensor(features, dtype=torch.float32)
-                except ValueError as e:
+                    if isinstance(features, list) and features:
+                        # Try to stack if it's a list of tensors
+                        if all(isinstance(f, torch.Tensor) for f in features):
+                            features = torch.stack(features)
+                        else:
+                            # Convert to numpy first if not all tensors
+                            features = torch.tensor(np.array(features), dtype=torch.float32)
+                    else:
+                        features = torch.tensor(features, dtype=torch.float32)
+                except Exception as e:
                     print(f"Error converting features to tensor at idx {idx}: {e}")
                     # Provide a dummy tensor as fallback
                     features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
             
-            # Ensure correct data type if already a tensor
+            # Ensure correct data type
             features = features.float()
             
             # Ensure [n_patches, feature_dim] format
@@ -185,16 +231,20 @@ class CachedDataset(Dataset):
             
             # Handle case where features might be 1D or have unexpected shape
             if features.dim() == 1:
-                # If it's a 1D tensor, reshape it to 2D with a single feature
-                features = features.unsqueeze(0)
-                if features.shape[1] != 512:
+                if features.shape[0] == 512:
+                    # If it's a single 512-dim vector, make it a single patch
+                    features = features.unsqueeze(0)
+                else:
+                    # If it's not 512-dim, create dummy
                     features = torch.zeros((1, 512), dtype=torch.float32)
             elif features.dim() > 2:
-                # For higher dimensions, flatten to 2D
-                orig_shape = features.shape
-                print(f"Warning: Unexpected feature dimension {orig_shape} at idx {idx}, flattening to 2D")
-                features = features.reshape(-1, 512)
-                if features.shape[1] != 512:
+                # For higher dimensions, try to reshape intelligently
+                if features.shape[-1] == 512:
+                    # If the last dimension is 512, reshape to [n, 512]
+                    features = features.reshape(-1, 512)
+                else:
+                    # Otherwise, create a dummy tensor
+                    print(f"Warning: Unexpected feature dimension {features.shape} at idx {idx}")
                     features = torch.zeros((1, 512), dtype=torch.float32)
             
             # Pad or truncate the features to max_patches
