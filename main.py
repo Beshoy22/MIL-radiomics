@@ -9,6 +9,9 @@ from conv_mil_model import create_conv_model
 from lightweight_conv_mil_model import create_lightweight_conv_model
 from model_train import setup_training, train_model, evaluate_model
 from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve, plot_comparison_metrics
+from cross_validation import create_cached_folds, create_fold_loaders
+from cross_val_training import run_cross_validation
+from metrics_with_ci import evaluate_model_with_ci, plot_metrics_with_ci
 
 
 def main(args):
@@ -25,126 +28,163 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print(f"Using device: {device}")
     
-    # Prepare data loaders
-    train_loader, val_loader, test_loader, class_weights, metrics, max_patches = prepare_dataloaders(
-        data_dir=args.data_dir,
-        endpoint=args.endpoint,
-        batch_size=args.batch_size,
-        oversample_factor=args.oversample_factor,
-        val_size=args.val_size,
-        test_size=args.test_size,
-        num_workers=args.num_workers,
-        seed=args.seed,
-        use_cache=args.use_cache,
-        cache_dir=args.cache_dir
-    )
-    print(f"Data loaders ready")
-    
-    # Create model based on model type
-    if args.model_type == 'transformer':
-        model = create_model(
-            feature_dim=args.feature_dim,
-            hidden_dim=args.hidden_dim,
-            num_heads=args.num_heads,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            num_classes=len(class_weights),
+    if args.cv_folds > 1:
+        # Cross-validation mode
+        print(f"Using {args.cv_folds}-fold cross-validation")
+        
+        # Create folds
+        folds, max_patches, class_weights = create_cached_folds(
+            data_dir=args.data_dir,
+            endpoint=args.endpoint,
+            n_folds=args.cv_folds,
+            seed=args.seed,
+            cache_dir=args.cache_dir
+        )
+        
+        # Run cross-validation
+        best_model, fold_metrics, fold_histories = run_cross_validation(
+            args=args,
+            folds=folds,
             max_patches=max_patches,
+            class_weights=class_weights,
             device=device
         )
-        print(f"Transformer model ready")
-    elif args.model_type == 'lstm':
-        model = create_lstm_model(
-            feature_dim=args.feature_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            bidirectional=args.bidirectional,
-            num_classes=len(class_weights),
-            max_patches=max_patches,
-            device=device
-        )
-        print(f"LSTM model ready")
-    elif args.model_type == 'conv':
-        model = create_conv_model(
-            feature_dim=args.feature_dim,
-            hidden_dim=args.hidden_dim,
-            dropout=args.dropout,
-            num_classes=len(class_weights),
-            max_patches=max_patches,
-            num_groups=args.num_groups,
-            device=device
-        )
-        print(f"Convolutional model ready")
-    elif args.model_type == 'lightweight_conv':
-        model = create_lightweight_conv_model(
-            feature_dim=args.feature_dim,
-            hidden_dim=args.hidden_dim,
-            num_blocks=args.num_blocks,
-            dropout=args.dropout,
-            num_classes=len(class_weights),
-            max_patches=max_patches,
-            num_groups=args.num_groups,
-            device=device
-        )
-        print(f"Lightweight convolutional model ready")
+        
+        return best_model, fold_metrics, fold_histories
+        
     else:
-        raise ValueError(f"Unsupported model type: {args.model_type}")
-    
-    # Print model architecture summary
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model has {num_params:,} trainable parameters")
-    
-    # Set up training components
-    criterion, optimizer, scheduler = setup_training(
-        model=model,
-        learning_rate=args.lr,
-        weight_decay=args.weight_decay,
-        class_weights=class_weights,
-        device=device
-    )
-    
-    # Train model
-    print(f"Training {args.model_type} model...")
-    model, history = train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        num_epochs=args.num_epochs,
-        early_stopping_patience=args.patience,
-        device=device
-    )
-    
-    # Evaluate model on all datasets
-    print(f"Evaluating {args.model_type} model on all datasets...")
-    metrics = evaluate_model(
-        model=model,
-        test_loader=test_loader,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        device=device
-    )
-    
-    # Save model and results
-    save_model_and_results(
-        model=model,
-        metrics=metrics,
-        history=history,
-        output_dir=args.output_dir
-    )
-    
-    # Plot results
-    plot_training_curves(history, args.output_dir)
-    plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir)
-    plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir)
-    # Plot comparison metrics across datasets
-    plot_comparison_metrics(metrics, args.output_dir)
-    
-    return model, metrics, history
+        # Standard train/val/test mode
+        print("Using standard train/val/test split")
+        
+        # Prepare data loaders
+        train_loader, val_loader, test_loader, class_weights, metrics, max_patches = prepare_dataloaders(
+            data_dir=args.data_dir,
+            endpoint=args.endpoint,
+            batch_size=args.batch_size,
+            oversample_factor=args.oversample_factor,
+            val_size=args.val_size,
+            test_size=args.test_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            use_cache=args.use_cache,
+            cache_dir=args.cache_dir
+        )
+        print(f"Data loaders ready")
+        
+        # Create model based on model type
+        if args.model_type == 'transformer':
+            model = create_model(
+                feature_dim=args.feature_dim,
+                hidden_dim=args.hidden_dim,
+                num_heads=args.num_heads,
+                num_layers=args.num_layers,
+                dropout=args.dropout,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                device=device
+            )
+            print(f"Transformer model ready")
+        elif args.model_type == 'lstm':
+            model = create_lstm_model(
+                feature_dim=args.feature_dim,
+                hidden_dim=args.hidden_dim,
+                num_layers=args.num_layers,
+                dropout=args.dropout,
+                bidirectional=args.bidirectional,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                use_attention=args.use_attention,  # Use the new attention flag
+                device=device
+            )
+            print(f"LSTM model ready (with {'attention' if args.use_attention else 'pooling'})")
+        elif args.model_type == 'conv':
+            model = create_conv_model(
+                feature_dim=args.feature_dim,
+                hidden_dim=args.hidden_dim,
+                dropout=args.dropout,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                num_groups=args.num_groups,
+                device=device
+            )
+            print(f"Convolutional model ready")
+        elif args.model_type == 'lightweight_conv':
+            model = create_lightweight_conv_model(
+                feature_dim=args.feature_dim,
+                hidden_dim=args.hidden_dim,
+                num_blocks=args.num_blocks,
+                dropout=args.dropout,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                num_groups=args.num_groups,
+                device=device
+            )
+            print(f"Lightweight convolutional model ready")
+        else:
+            raise ValueError(f"Unsupported model type: {args.model_type}")
+        
+        # Print model architecture summary
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model has {num_params:,} trainable parameters")
+        
+        # Set up training components
+        criterion, optimizer, scheduler = setup_training(
+            model=model,
+            learning_rate=args.lr,
+            weight_decay=args.weight_decay,
+            class_weights=class_weights,
+            device=device
+        )
+        
+        # Train model
+        print(f"Training {args.model_type} model...")
+        model, history = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            num_epochs=args.num_epochs,
+            early_stopping_patience=args.patience,
+            device=device
+        )
+        
+        # Evaluate model with confidence intervals
+        print(f"Evaluating {args.model_type} model with confidence intervals...")
+        metrics = evaluate_model_with_ci(
+            model=model,
+            dataloader=test_loader,
+            device=device,
+            n_bootstrap=args.bootstrap_samples
+        )
+        
+        # Also get standard metrics on all datasets for comparison
+        standard_metrics = evaluate_model(
+            model=model,
+            test_loader=test_loader,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            device=device
+        )
+        
+        # Save model and results
+        save_model_and_results(
+            model=model,
+            metrics=metrics,  # Use metrics with confidence intervals
+            history=history,
+            output_dir=args.output_dir
+        )
+        
+        # Plot results
+        plot_training_curves(history, args.output_dir)
+        plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir)
+        plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir)
+        plot_comparison_metrics(standard_metrics, args.output_dir)
+        plot_metrics_with_ci(metrics, args.output_dir)
+        
+        return model, metrics, history
 
 
 if __name__ == "__main__":
@@ -164,6 +204,12 @@ if __name__ == "__main__":
     parser.add_argument('--val_size', type=float, default=0.15, help='Validation set size')
     parser.add_argument('--test_size', type=float, default=0.15, help='Test set size')
     
+    # Cross-validation arguments
+    parser.add_argument('--cv_folds', type=int, default=1, 
+                        help='Number of folds for cross-validation (1 for no CV)')
+    parser.add_argument('--bootstrap_samples', type=int, default=1000,
+                        help='Number of bootstrap samples for confidence intervals')
+    
     # Caching arguments
     parser.add_argument('--use_cache', action='store_true', help='Use caching for faster loading')
     parser.add_argument('--cache_dir', type=str, default=None, help='Directory to store cached data files')
@@ -179,6 +225,8 @@ if __name__ == "__main__":
     
     # LSTM-specific arguments
     parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional LSTM (LSTM only)')
+    parser.add_argument('--use_attention', action='store_true', 
+                        help='Use attention mechanism in LSTM (if false, uses average pooling)')
     
     # Conv-specific arguments
     parser.add_argument('--num_groups', type=int, default=10, 
@@ -204,7 +252,10 @@ if __name__ == "__main__":
     
     # Set default output directory if not specified
     if args.output_dir is None:
-        args.output_dir = f'./outputs/{args.model_type}'
+        if args.cv_folds > 1:
+            args.output_dir = f'./outputs/{args.model_type}_cv{args.cv_folds}'
+        else:
+            args.output_dir = f'./outputs/{args.model_type}'
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)

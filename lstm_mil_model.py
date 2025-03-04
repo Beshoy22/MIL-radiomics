@@ -26,10 +26,11 @@ class LSTMAttention(nn.Module):
 
 
 class MIL_LSTM(nn.Module):
-    """LSTM-based Multiple Instance Learning model"""
+    """LSTM-based Multiple Instance Learning model with optional attention"""
     
     def __init__(self, feature_dim=512, hidden_dim=128, num_layers=2, 
-                 dropout=0.3, bidirectional=True, num_classes=2, max_patches=300):
+                 dropout=0.3, bidirectional=True, num_classes=2, max_patches=300,
+                 use_attention=True):  # Added parameter for toggling attention
         super(MIL_LSTM, self).__init__()
         
         # Feature projection layer
@@ -51,8 +52,15 @@ class MIL_LSTM(nn.Module):
         # Layer normalization for better training stability
         self.layer_norm = nn.LayerNorm(lstm_output_dim)
         
+        # Flag for using attention
+        self.use_attention = use_attention
+        
         # Attention-based pooling
-        self.attention = LSTMAttention(lstm_output_dim, dropout=dropout)
+        if use_attention:
+            self.attention = LSTMAttention(lstm_output_dim, dropout=dropout)
+        else:
+            # Global pooling as alternative when not using attention
+            self.global_pool = nn.AdaptiveAvgPool1d(1)
         
         # Classifier with regularization to prevent overfitting
         self.classifier = nn.Sequential(
@@ -88,7 +96,6 @@ class MIL_LSTM(nn.Module):
         x = self.feature_proj(x)  # [batch_size, n_patches, hidden_dim]
         
         # Create a mask for padded sequences (zeros in the input are considered padding)
-        # This helps prevent the model from learning patterns from padded sequences
         mask = (torch.sum(torch.abs(x), dim=2) > 0).float().unsqueeze(-1)  # [batch_size, n_patches, 1]
         
         # Apply LSTM
@@ -100,8 +107,19 @@ class MIL_LSTM(nn.Module):
         # Apply layer normalization
         x = self.layer_norm(x)
         
-        # Apply attention pooling
-        x, attn_weights = self.attention(x)  # [batch_size, lstm_output_dim]
+        # Process based on whether we're using attention or not
+        if self.use_attention:
+            # Apply attention pooling
+            x, attn_weights = self.attention(x)  # [batch_size, lstm_output_dim]
+        else:
+            # Use global average pooling over patches
+            # First transpose to [batch_size, lstm_output_dim, n_patches]
+            x_transposed = x.transpose(1, 2)
+            # Apply pooling
+            x = self.global_pool(x_transposed).squeeze(2)  # [batch_size, lstm_output_dim]
+            # Create dummy attention weights for compatibility when return_attn=True
+            attn_weights = torch.ones(batch_size, 1, n_patches) / n_patches
+            attn_weights = attn_weights.to(x.device)
         
         # Apply dropout for regularization
         x = self.dropout(x)
@@ -116,7 +134,8 @@ class MIL_LSTM(nn.Module):
 
 
 def create_lstm_model(feature_dim=512, hidden_dim=128, num_layers=2, dropout=0.3, 
-                     bidirectional=True, num_classes=2, max_patches=300, device=None):
+                     bidirectional=True, num_classes=2, max_patches=300, 
+                     use_attention=True, device=None):
     """
     Create and initialize a MIL LSTM model.
     
@@ -128,6 +147,7 @@ def create_lstm_model(feature_dim=512, hidden_dim=128, num_layers=2, dropout=0.3
         bidirectional (bool): Whether to use bidirectional LSTM
         num_classes (int): Number of output classes
         max_patches (int): Maximum number of patches
+        use_attention (bool): Whether to use attention mechanism
         device (torch.device): Device to place the model on
         
     Returns:
@@ -140,7 +160,8 @@ def create_lstm_model(feature_dim=512, hidden_dim=128, num_layers=2, dropout=0.3
         dropout=dropout,
         bidirectional=bidirectional,
         num_classes=num_classes,
-        max_patches=max_patches
+        max_patches=max_patches,
+        use_attention=use_attention  # Pass the attention flag
     )
     
     # Initialize weights for better training stability
