@@ -4,6 +4,7 @@ import torch
 
 from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
+from lstm_mil_model import create_lstm_model
 from model_train import setup_training, train_model, evaluate_model
 from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
 
@@ -37,18 +38,37 @@ def main(args):
     )
     print(f"Data loaders ready")
     
-    # Create model
-    model = create_model(
-        feature_dim=args.feature_dim,
-        hidden_dim=args.hidden_dim,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        num_classes=len(class_weights),
-        max_patches=max_patches,
-        device=device
-    )
-    print(f"Model ready")
+    # Create model based on model type
+    if args.model_type == 'transformer':
+        model = create_model(
+            feature_dim=args.feature_dim,
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            num_classes=len(class_weights),
+            max_patches=max_patches,
+            device=device
+        )
+        print(f"Transformer model ready")
+    elif args.model_type == 'lstm':
+        model = create_lstm_model(
+            feature_dim=args.feature_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            bidirectional=args.bidirectional,
+            num_classes=len(class_weights),
+            max_patches=max_patches,
+            device=device
+        )
+        print(f"LSTM model ready")
+    else:
+        raise ValueError(f"Unsupported model type: {args.model_type}")
+    
+    # Print model architecture summary
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {num_params:,} trainable parameters")
     
     # Set up training components
     criterion, optimizer, scheduler = setup_training(
@@ -60,7 +80,7 @@ def main(args):
     )
     
     # Train model
-    print("Training model...")
+    print(f"Training {args.model_type} model...")
     model, history = train_model(
         model=model,
         train_loader=train_loader,
@@ -74,7 +94,7 @@ def main(args):
     )
     
     # Evaluate model
-    print("Evaluating model...")
+    print(f"Evaluating {args.model_type} model...")
     metrics = evaluate_model(
         model=model,
         test_loader=test_loader,
@@ -99,25 +119,36 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train MIL Transformer for CT patch embeddings')
+    parser = argparse.ArgumentParser(description='Train MIL model for CT patch embeddings')
+    
+    # Model type
+    parser.add_argument('--model_type', type=str, default='transformer', 
+                        choices=['transformer', 'lstm'], help='Type of model to train')
     
     # Data arguments
     parser.add_argument('--data_dir', type=str, required=True, help='Directory containing .pkl files')
-    parser.add_argument('--endpoint', type=str, default='OS_6', choices=['OS_6', 'OS_24'], help='Endpoint to use')
-    parser.add_argument('--oversample_factor', type=float, default=1.0, help='Factor for oversampling minority class (0 to disable)')
+    parser.add_argument('--endpoint', type=str, default='OS_6', choices=['OS_6', 'OS_24'], 
+                        help='Endpoint to use')
+    parser.add_argument('--oversample_factor', type=float, default=1.0, 
+                        help='Factor for oversampling minority class (0 to disable)')
     parser.add_argument('--val_size', type=float, default=0.15, help='Validation set size')
     parser.add_argument('--test_size', type=float, default=0.15, help='Test set size')
     
     # Caching arguments
-    parser.add_argument('--use_cache', action='store_true', help='Use in-memory caching for faster loading')
+    parser.add_argument('--use_cache', action='store_true', help='Use caching for faster loading')
     parser.add_argument('--cache_dir', type=str, default=None, help='Directory to store cached data files')
     
-    # Model arguments
+    # Model arguments (common)
     parser.add_argument('--feature_dim', type=int, default=512, help='Dimension of input features')
     parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension in model')
-    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
-    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer/LSTM layers')
     parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    
+    # Transformer-specific arguments
+    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads (transformer only)')
+    
+    # LSTM-specific arguments
+    parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional LSTM (LSTM only)')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -129,10 +160,15 @@ if __name__ == "__main__":
     
     # Other arguments
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--output_dir', type=str, default='./outputs', help='Output directory for results')
+    parser.add_argument('--output_dir', type=str, default=None, 
+                       help='Output directory for results (defaults to ./outputs/model_type)')
     parser.add_argument('--cpu', action='store_true', help='Use CPU even if GPU is available')
     
     args = parser.parse_args()
+    
+    # Set default output directory if not specified
+    if args.output_dir is None:
+        args.output_dir = f'./outputs/{args.model_type}'
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
