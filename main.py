@@ -5,6 +5,7 @@ import torch
 from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
 from lstm_mil_model import create_lstm_model
+from conv_mil_model import create_conv_model
 from model_train import setup_training, train_model, evaluate_model
 from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve, plot_comparison_metrics
 
@@ -63,6 +64,17 @@ def main(args):
             device=device
         )
         print(f"LSTM model ready")
+    elif args.model_type == 'conv':
+        model = create_conv_model(
+            feature_dim=args.feature_dim,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+            num_classes=len(class_weights),
+            max_patches=max_patches,
+            num_groups=args.num_groups,
+            device=device
+        )
+        print(f"Convolutional model ready")
     else:
         raise ValueError(f"Unsupported model type: {args.model_type}")
     
@@ -127,7 +139,7 @@ if __name__ == "__main__":
     
     # Model type
     parser.add_argument('--model_type', type=str, default='transformer', 
-                        choices=['transformer', 'lstm'], help='Type of model to train')
+                        choices=['transformer', 'lstm', 'conv'], help='Type of model to train')
     
     # Data arguments
     parser.add_argument('--data_dir', type=str, required=True, help='Directory containing .pkl files')
@@ -153,6 +165,9 @@ if __name__ == "__main__":
     
     # LSTM-specific arguments
     parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional LSTM (LSTM only)')
+    
+    # Conv-specific arguments
+    parser.add_argument('--num_groups', type=int, default=10, help='Number of groups for patch aggregation (conv only)')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
