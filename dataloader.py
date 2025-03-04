@@ -295,18 +295,20 @@ class SplitDataset(Dataset):
         # Convert to torch tensors - handle both numpy arrays and tensors
         if not isinstance(features, torch.Tensor):
             try:
+                # First ensure features is a numpy array to handle list-of-lists or other formats
+                if not isinstance(features, np.ndarray):
+                    features = np.array(features)
                 features = torch.tensor(features, dtype=torch.float32)
-            except ValueError:
-                # This occurs if features is not a simple scalar or array
-                # We'll do a safer conversion with explicit numpy conversion first
-                import numpy as np
-                features = torch.tensor(np.array(features), dtype=torch.float32)
+            except Exception as e:
+                # More detailed error reporting
+                raise ValueError(f"Error converting features to tensor: {e}. Features type: {type(features)}, shape: {np.shape(features) if hasattr(features, 'shape') else 'unknown'}")
         else:
             # Ensure correct data type if already a tensor
             features = features.float()
         
-        # Check if we need to transpose features
+        # Check if we need to transpose features - consistent format is [n_patches, feature_dim]
         if features.dim() == 2 and features.shape[0] < features.shape[1]:
+            # If feature_dim > n_patches, we need to transpose
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
             
         label = torch.tensor(item['label'], dtype=torch.long)
@@ -328,36 +330,53 @@ def collate_fn(batch):
     features = [item[0] for item in batch]
     labels = [item[1] for item in batch]
     
-    # Check if features need to be transposed (if they're in shape [feature_dim, n_patches])
-    # We want shape [n_patches, feature_dim] for the transformer
-    transposed_features = []
+    # Print shapes for debugging
+    feature_shapes = [f.shape for f in features]
+    print(f"Feature shapes in batch: {feature_shapes}")
+    
+    # Ensure all features have the same dimensionality structure
+    processed_features = []
     for f in features:
-        # If the second dimension is larger than the first, it's likely in [feature_dim, n_patches] format
+        # Handle the case where features are [feature_dim, n_patches]
         if f.dim() == 2 and f.shape[0] < f.shape[1]:
-            transposed_features.append(f.transpose(0, 1))  # Transpose to [n_patches, feature_dim]
+            # Transpose to [n_patches, feature_dim]
+            processed_features.append(f.transpose(0, 1))
+        # Handle the case where features are already [n_patches, feature_dim]
+        elif f.dim() == 2:
+            processed_features.append(f)
+        # Handle unexpected dimensionality
         else:
-            transposed_features.append(f)
+            raise ValueError(f"Unexpected feature shape: {f.shape}. Expected 2D tensor.")
     
-    # Pad features to the same number of patches
-    max_patches = max(f.shape[0] for f in transposed_features)
-    feature_dim = transposed_features[0].shape[1]
+    # Get the dimensions for padding
+    max_patches = max(f.shape[0] for f in processed_features)
+    feature_dim = processed_features[0].shape[1]  # Assuming all have same feature dimension
     
+    print(f"Padding to max_patches={max_patches}, feature_dim={feature_dim}")
+    
+    # Pad each feature tensor to have the same number of patches
     padded_features = []
-    for f in transposed_features:
+    for f in processed_features:
         n_patches = f.shape[0]
         if n_patches < max_patches:
-            # Pad with zeros
-            padding = torch.zeros(max_patches - n_patches, feature_dim, dtype=f.dtype)
+            # Create padding
+            padding = torch.zeros(max_patches - n_patches, feature_dim, dtype=f.dtype, device=f.device)
+            # Concatenate with original tensor along patch dimension
             padded_f = torch.cat([f, padding], dim=0)
         else:
             padded_f = f
         padded_features.append(padded_f)
     
-    # Stack features and labels
-    features_tensor = torch.stack(padded_features)
-    labels_tensor = torch.stack(labels)
-    
-    return features_tensor, labels_tensor
+    # Stack the padded features and labels
+    try:
+        features_tensor = torch.stack(padded_features)
+        labels_tensor = torch.stack(labels)
+        return features_tensor, labels_tensor
+    except RuntimeError as e:
+        # More detailed error message
+        shapes = [pf.shape for pf in padded_features]
+        raise RuntimeError(f"Failed to stack tensors with shapes: {shapes}. Original error: {e}")
+
 
 
 def create_weighted_sampler(labels, oversample_factor=1.0):
