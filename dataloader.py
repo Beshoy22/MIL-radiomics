@@ -13,14 +13,14 @@ from sklearn.model_selection import train_test_split
 class PatchEmbeddingsDataset(Dataset):
     """Dataset for loading patch embeddings from CT scans stored in .pkl files"""
     
-    def __init__(self, pkl_files, endpoint='OS_6', transform=None, cache_dir=None, max_patches=None):
+    def __init__(self, pkl_files, endpoint='OS_6', transform=None, cache_dir=None, max_patches=300):
         """
         Args:
             pkl_files (list): List of paths to .pkl files
             endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
             transform (callable, optional): Optional transform to be applied on features
             cache_dir (str, optional): Directory to cache processed data
-            max_patches (int, optional): Maximum number of patches for padding
+            max_patches (int): Maximum number of patches for padding (fixed based on analysis)
         """
         self.endpoint = endpoint
         self.transform = transform
@@ -28,7 +28,7 @@ class PatchEmbeddingsDataset(Dataset):
         self.centers = []
         self.cache_dir = cache_dir
         self.cache = {}  # Memory cache for faster access
-        self.max_patches = max_patches
+        self.max_patches = max_patches  # Fixed based on dataset analysis
         
         # Create cache directory if specified and doesn't exist
         if cache_dir and not os.path.exists(cache_dir):
@@ -106,24 +106,7 @@ class PatchEmbeddingsDataset(Dataset):
                 continue
                 
         print(f"Loaded {len(self.data)} samples from {len(pkl_files)} files")
-        
-        # If max_patches not provided, determine it from the data
-        if self.max_patches is None:
-            self._determine_max_patches()
-    
-    def _determine_max_patches(self):
-        """Determine maximum number of patches across all samples"""
-        max_patches = 0
-        for item in self.data:
-            features = item['features']
-            if isinstance(features, torch.Tensor):
-                n_patches = features.shape[0]
-            else:
-                n_patches = len(features)
-            max_patches = max(max_patches, n_patches)
-        
-        self.max_patches = max_patches
-        print(f"Determined max_patches = {self.max_patches}")
+        print(f"Using fixed max_patches = {self.max_patches} based on dataset analysis")
     
     def __len__(self):
         return len(self.data)
@@ -146,16 +129,16 @@ class PatchEmbeddingsDataset(Dataset):
         if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
         
-        # Pad the features if needed
-        if self.max_patches is not None:
-            n_patches = features.shape[0]
-            if n_patches < self.max_patches:
-                padding = torch.zeros(self.max_patches - n_patches, features.shape[1], 
-                                     dtype=features.dtype, device=features.device)
-                features = torch.cat([features, padding], dim=0)
-            elif n_patches > self.max_patches:
-                # If more patches than max_patches, truncate
-                features = features[:self.max_patches]
+        # Pad or truncate the features to max_patches
+        n_patches = features.shape[0]
+        if n_patches < self.max_patches:
+            # Pad with zeros if fewer patches than max_patches
+            padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                dtype=features.dtype, device=features.device)
+            features = torch.cat([features, padding], dim=0)
+        elif n_patches > self.max_patches:
+            # Truncate if more patches than max_patches
+            features = features[:self.max_patches]
                 
         label = torch.tensor(item['label'], dtype=torch.long)
         
@@ -166,7 +149,7 @@ class SplitDataset(Dataset):
     """Dataset for a specific split (train, val, or test)"""
     
     def __init__(self, split_data, split_type, endpoint='OS_6', transform=None, 
-                use_cache=True, max_patches=None):
+                use_cache=True, max_patches=300):
         """
         Args:
             split_data (dict): Output from stratified_split function
@@ -174,7 +157,7 @@ class SplitDataset(Dataset):
             endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
             transform (callable, optional): Optional transform to be applied on features
             use_cache (bool): Whether to cache data in memory
-            max_patches (int, optional): Maximum number of patches for padding
+            max_patches (int): Maximum number of patches for padding (fixed based on analysis)
         """
         self.endpoint = endpoint
         self.transform = transform
@@ -182,11 +165,11 @@ class SplitDataset(Dataset):
         self.labels = split_data[f'{split_type}_labels']
         self.use_cache = use_cache
         self.data_cache = {} if use_cache else None
-        self.max_patches = max_patches
+        self.max_patches = max_patches  # Fixed based on dataset analysis
         
         # Load the actual data
         self.data = []
-        print(f"Loading {split_type} data...")
+        print(f"Loading {split_type} data with max_patches = {self.max_patches}...")
         
         # Use tqdm for progress tracking
         for i, ((pkl_file, idx), label) in enumerate(tqdm(zip(self.instances, self.labels), 
@@ -220,24 +203,6 @@ class SplitDataset(Dataset):
                 'features': features,
                 'label': label
             })
-        
-        # If max_patches not provided, determine it from the data
-        if self.max_patches is None:
-            self._determine_max_patches()
-    
-    def _determine_max_patches(self):
-        """Determine maximum number of patches across all samples"""
-        max_patches = 0
-        for item in self.data:
-            features = item['features']
-            if isinstance(features, torch.Tensor):
-                n_patches = features.shape[0]
-            else:
-                n_patches = len(features)
-            max_patches = max(max_patches, n_patches)
-        
-        self.max_patches = max_patches
-        print(f"Determined max_patches = {self.max_patches}")
     
     def __len__(self):
         return len(self.data)
@@ -260,16 +225,16 @@ class SplitDataset(Dataset):
         if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
         
-        # Pad the features if needed
-        if self.max_patches is not None:
-            n_patches = features.shape[0]
-            if n_patches < self.max_patches:
-                padding = torch.zeros(self.max_patches - n_patches, features.shape[1], 
-                                     dtype=features.dtype, device=features.device)
-                features = torch.cat([features, padding], dim=0)
-            elif n_patches > self.max_patches:
-                # If more patches than max_patches, truncate
-                features = features[:self.max_patches]
+        # Pad or truncate the features to max_patches
+        n_patches = features.shape[0]
+        if n_patches < self.max_patches:
+            # Pad with zeros if fewer patches than max_patches
+            padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                dtype=features.dtype, device=features.device)
+            features = torch.cat([features, padding], dim=0)
+        elif n_patches > self.max_patches:
+            # Truncate if more patches than max_patches
+            features = features[:self.max_patches]
                 
         label = torch.tensor(item['label'], dtype=torch.long)
         
@@ -278,7 +243,7 @@ class SplitDataset(Dataset):
 
 def collate_fn(batch):
     """
-    Modified collate function that simply stacks the already padded tensors.
+    Simplified collate function that stacks the pre-padded tensors.
     Since all tensors are pre-padded to the same size, we don't need custom padding here.
     
     Args:
@@ -300,6 +265,158 @@ def collate_fn(batch):
     labels_tensor = torch.stack(labels)
     
     return features_tensor, labels_tensor
+
+
+def stratified_split(pkl_files, endpoint='OS_6', val_size=0.15, test_size=0.15, random_state=42):
+    """
+    Split the data stratifying by both label and center.
+    
+    Args:
+        pkl_files (list): List of paths to .pkl files
+        endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
+        val_size (float): Proportion of data for validation
+        test_size (float): Proportion of data for testing
+        random_state (int): Random seed
+        
+    Returns:
+        dict: Dictionary containing split indices and metadata
+    """
+    # Extract all instances with labels and their centers
+    all_instances = []
+    centers = []
+    labels = []
+    
+    print("Processing files for stratified split...")
+    for pkl_file in tqdm(pkl_files, desc="Processing files"):
+        try:
+            with open(pkl_file, 'rb') as f:
+                # Load the list of dictionaries
+                instances_list = pickle.load(f)
+                center = os.path.basename(pkl_file)
+                
+                for i, instance in enumerate(instances_list):
+                    # Skip instances without the specified endpoint
+                    if endpoint not in instance:
+                        continue
+                    
+                    # Get the label and convert to binary if needed
+                    label = instance[endpoint]
+                    if not isinstance(label, int):
+                        label = 1 if label else 0
+                    
+                    all_instances.append((pkl_file, i))  # Store file path and index
+                    centers.append(center)
+                    labels.append(label)
+        except Exception as e:
+            print(f"Error loading {pkl_file}: {e}")
+            continue
+    
+    print(f"Found {len(all_instances)} valid instances across all files")
+    
+    # Convert to numpy arrays for scikit-learn
+    instances_array = np.array(all_instances, dtype=object)
+    centers_array = np.array(centers)
+    labels_array = np.array(labels)
+    
+    # Create a composite stratification variable combining label and center
+    strat_var = [f"{l}_{c}" for l, c in zip(labels_array, centers_array)]
+    
+    # First split: train+val vs test
+    train_val_idx, test_idx, _, _ = train_test_split(
+        np.arange(len(all_instances)),
+        strat_var,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=strat_var
+    )
+    
+    # Second split: train vs val
+    strat_var_train_val = [strat_var[i] for i in train_val_idx]
+    
+    adjusted_val_size = val_size / (1 - test_size)  # Adjust val_size relative to train+val
+    train_idx, val_idx, _, _ = train_test_split(
+        train_val_idx,
+        strat_var_train_val,
+        test_size=adjusted_val_size,
+        random_state=random_state,
+        stratify=strat_var_train_val
+    )
+    
+    # Count instances per split
+    train_count = len(train_idx)
+    val_count = len(val_idx)
+    test_count = len(test_idx)
+    
+    # Count labels per split
+    train_label_counts = Counter(labels_array[train_idx])
+    val_label_counts = Counter(labels_array[val_idx])
+    test_label_counts = Counter(labels_array[test_idx])
+    
+    # Extract instances for each split
+    train_instances = instances_array[train_idx]
+    val_instances = instances_array[val_idx]
+    test_instances = instances_array[test_idx]
+    
+    return {
+        'train': train_instances,
+        'val': val_instances,
+        'test': test_instances,
+        'train_labels': labels_array[train_idx],
+        'val_labels': labels_array[val_idx],
+        'test_labels': labels_array[test_idx],
+        'train_centers': centers_array[train_idx],
+        'val_centers': centers_array[val_idx],
+        'test_centers': centers_array[test_idx],
+        'all_instances': all_instances,
+        'centers': centers,
+        'labels': labels,
+        'metrics': {
+            'train_count': train_count,
+            'val_count': val_count,
+            'test_count': test_count,
+            'train_label_counts': train_label_counts,
+            'val_label_counts': val_label_counts,
+            'test_label_counts': test_label_counts
+        }
+    }
+
+
+def create_weighted_sampler(labels, oversample_factor=1.0):
+    """
+    Create a weighted random sampler for oversampling the minority class.
+    
+    Args:
+        labels (list or array): Class labels
+        oversample_factor (float): Factor to multiply minority class weight
+                                 (1.0 means balanced, >1.0 means more minority samples)
+                                 (0.0 means no oversampling - use uniform sampling)
+    
+    Returns:
+        WeightedRandomSampler or None: Sampler for DataLoader, None if no oversampling
+    """
+    # If oversample_factor is 0, return None to indicate no oversampling
+    if oversample_factor == 0:
+        return None
+        
+    # Count instances per class
+    label_counts = Counter(labels)
+    
+    # Calculate weights per class (inversely proportional to class frequency)
+    n_samples = len(labels)
+    class_weights = {cls: n_samples / count for cls, count in label_counts.items()}
+    
+    # Apply oversample factor to minority class
+    if 0 in class_weights and 1 in class_weights:
+        minority_class = 0 if label_counts[0] < label_counts[1] else 1
+        class_weights[minority_class] *= oversample_factor
+    
+    # Assign weights to each sample
+    weights = [class_weights[label] for label in labels]
+    
+    # Create sampler
+    sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+    
+    return sampler
 
 
 def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
@@ -343,12 +460,11 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
     print(f"  Validation: {metrics['val_count']} samples, {dict(metrics['val_label_counts'])}")
     print(f"  Test: {metrics['test_count']} samples, {dict(metrics['test_label_counts'])}")
     
-    # First, determine max_patches from a subset of data
-    print("Determining max_patches from a subset of data...")
-    max_patches = determine_max_patches(split_data, subset_size=50)
-    print(f"Using max_patches = {max_patches} for all datasets")
+    # Use fixed max_patches based on dataset analysis
+    max_patches = 300  # Replace with the actual value from your analysis
+    print(f"Using fixed max_patches = {max_patches} based on dataset analysis")
     
-    # Create datasets for each split with the pre-determined max_patches
+    # Create datasets for each split with the fixed max_patches
     train_dataset = SplitDataset(split_data, 'train', endpoint=endpoint, 
                                 use_cache=use_cache, max_patches=max_patches)
     val_dataset = SplitDataset(split_data, 'val', endpoint=endpoint, 
@@ -367,7 +483,7 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
     else:
         shuffle = True  # Shuffle when not using sampler
     
-    # Create data loaders - using our simplified collate_fn since padding is done in datasets
+    # Create data loaders with our simplified collate_fn
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -412,66 +528,3 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
         metrics, 
         max_patches
     )
-
-
-def determine_max_patches(split_data, subset_size=50):
-    """
-    Determine maximum number of patches from a subset of the data.
-    
-    Args:
-        split_data (dict): Output from stratified_split function
-        subset_size (int): Number of instances to check
-        
-    Returns:
-        int: Maximum number of patches
-    """
-    max_patches = 0
-    
-    # Combine instances from all splits
-    all_instances = np.concatenate([
-        split_data['train'][:min(subset_size // 3, len(split_data['train']))],
-        split_data['val'][:min(subset_size // 3, len(split_data['val']))],
-        split_data['test'][:min(subset_size // 3, len(split_data['test']))]
-    ])
-    
-    print(f"Checking {len(all_instances)} instances to determine max_patches...")
-    
-    for pkl_file, idx in tqdm(all_instances):
-        try:
-            with open(pkl_file, 'rb') as f:
-                instances_list = pickle.load(f)
-                instance = instances_list[idx]
-                features = instance['features']
-                
-                # Check shape of features
-                if isinstance(features, torch.Tensor):
-                    # If already a tensor, check dimensions
-                    if features.dim() == 2:
-                        if features.shape[0] == 512:  # [feature_dim, n_patches]
-                            n_patches = features.shape[1]
-                        else:  # [n_patches, feature_dim]
-                            n_patches = features.shape[0]
-                    else:
-                        n_patches = 0  # Skip invalid tensors
-                elif isinstance(features, np.ndarray):
-                    # If numpy array, check dimensions
-                    if features.ndim == 2:
-                        if features.shape[0] == 512:  # [feature_dim, n_patches]
-                            n_patches = features.shape[1]
-                        else:  # [n_patches, feature_dim]
-                            n_patches = features.shape[0]
-                    else:
-                        n_patches = 0  # Skip invalid arrays
-                else:
-                    # Try to infer dimensionality from other types
-                    n_patches = len(features)
-                
-                max_patches = max(max_patches, n_patches)
-        except Exception as e:
-            print(f"Error checking instance {idx} in {pkl_file}: {e}")
-            continue
-    
-    # Add a small buffer for safety
-    max_patches = int(max_patches * 1.1)
-    
-    return max_patches
