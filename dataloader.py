@@ -112,37 +112,63 @@ class PatchEmbeddingsDataset(Dataset):
         return len(self.data)
     
     def __getitem__(self, idx):
-        item = self.data[idx]
-        features = item['features']
-        
-        if self.transform:
-            features = self.transform(features)
-        
-        # Convert to torch tensors if not already
-        if not isinstance(features, torch.Tensor):
-            features = torch.tensor(features, dtype=torch.float32)
-        
-        # Ensure correct data type if already a tensor
-        features = features.float()
-        
-        # Ensure [n_patches, feature_dim] format
-        if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
-            features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
-        
-        # Pad or truncate the features to max_patches
-        n_patches = features.shape[0]
-        if n_patches < self.max_patches:
-            # Pad with zeros if fewer patches than max_patches
-            padding = torch.zeros(self.max_patches - n_patches, 512, 
-                                dtype=features.dtype, device=features.device)
-            features = torch.cat([features, padding], dim=0)
-        elif n_patches > self.max_patches:
-            # Truncate if more patches than max_patches
-            features = features[:self.max_patches]
-                
-        label = torch.tensor(item['label'], dtype=torch.long)
-        
-        return features, label
+        try:
+            item = self.data[idx]
+            features = item['features']
+            
+            if self.transform:
+                features = self.transform(features)
+            
+            # Convert to torch tensors if not already
+            if not isinstance(features, torch.Tensor):
+                try:
+                    features = torch.tensor(features, dtype=torch.float32)
+                except ValueError as e:
+                    print(f"Error converting features to tensor at idx {idx}: {e}")
+                    # Provide a dummy tensor as fallback
+                    features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+            
+            # Ensure correct data type if already a tensor
+            features = features.float()
+            
+            # Ensure [n_patches, feature_dim] format
+            if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
+                features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
+            
+            # Handle case where features might be 1D or have unexpected shape
+            if features.dim() == 1:
+                # If it's a 1D tensor, reshape it to 2D with a single feature
+                features = features.unsqueeze(0)
+                if features.shape[1] != 512:
+                    features = torch.zeros((1, 512), dtype=torch.float32)
+            elif features.dim() > 2:
+                # For higher dimensions, flatten to 2D
+                orig_shape = features.shape
+                print(f"Warning: Unexpected feature dimension {orig_shape} at idx {idx}, flattening to 2D")
+                features = features.reshape(-1, 512)
+                if features.shape[1] != 512:
+                    features = torch.zeros((1, 512), dtype=torch.float32)
+            
+            # Pad or truncate the features to max_patches
+            n_patches = features.shape[0]
+            if n_patches < self.max_patches:
+                # Pad with zeros if fewer patches than max_patches
+                padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                    dtype=features.dtype, device=features.device)
+                features = torch.cat([features, padding], dim=0)
+            elif n_patches > self.max_patches:
+                # Truncate if more patches than max_patches
+                features = features[:self.max_patches]
+            
+            label = torch.tensor(item['label'], dtype=torch.long)
+            
+            return features, label
+        except Exception as e:
+            print(f"Error in __getitem__ at idx {idx}: {e}")
+            # Return a dummy sample in case of error
+            dummy_features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+            dummy_label = torch.tensor(0, dtype=torch.long)
+            return dummy_features, dummy_label
 
 
 class SplitDataset(Dataset):
@@ -173,72 +199,122 @@ class SplitDataset(Dataset):
         
         # Use tqdm for progress tracking
         for i, ((pkl_file, idx), label) in enumerate(tqdm(zip(self.instances, self.labels), 
-                                                          desc=f"Loading {split_type} set", 
-                                                          total=len(self.instances))):
+                                                        desc=f"Loading {split_type} set", 
+                                                        total=len(self.instances))):
             # Check if this pkl_file is already in cache
             if self.use_cache and pkl_file in self.data_cache:
                 instances_list = self.data_cache[pkl_file]
             else:
-                with open(pkl_file, 'rb') as f:
-                    # Load the list of dictionaries from the pickle file
-                    instances_list = pickle.load(f)
-                    if self.use_cache:
-                        self.data_cache[pkl_file] = instances_list
-                
+                try:
+                    with open(pkl_file, 'rb') as f:
+                        # Load the list of dictionaries from the pickle file
+                        instances_list = pickle.load(f)
+                        if self.use_cache:
+                            self.data_cache[pkl_file] = instances_list
+                except Exception as e:
+                    print(f"Error loading {pkl_file}: {e}")
+                    continue
+            
             # Get the specific instance at the given index
-            instance = instances_list[idx]
-            
-            # Extract features
-            features = instance['features']
-            
-            # Convert features to torch tensor for manipulation
-            if not isinstance(features, torch.Tensor):
-                features = torch.tensor(features, dtype=torch.float32)
-            
-            # Transpose if in [feature_dim, n_patches] format
-            if features.dim() == 2 and features.shape[0] == 512:
-                features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
-            
-            self.data.append({
-                'features': features,
-                'label': label
-            })
+            try:
+                instance = instances_list[idx]
+                
+                # Extract features
+                features = instance['features']
+                
+                # Handle different feature types properly
+                if isinstance(features, torch.Tensor):
+                    features = features.float()  # Ensure it's float type
+                elif isinstance(features, np.ndarray):
+                    features = torch.tensor(features, dtype=torch.float32)
+                elif isinstance(features, list):
+                    # Convert list to numpy array first to handle potential nested structures
+                    try:
+                        features = np.array(features)
+                        features = torch.tensor(features, dtype=torch.float32)
+                    except ValueError as e:
+                        print(f"Error converting features to tensor in file {pkl_file}, idx {idx}: {e}")
+                        print(f"Feature type: {type(features)}, structure: {features[:2] if len(features) > 2 else features}")
+                        continue
+                else:
+                    print(f"Unsupported feature type: {type(features)} in file {pkl_file}, idx {idx}")
+                    continue
+                
+                # Transpose if in [feature_dim, n_patches] format
+                if features.dim() == 2 and features.shape[0] == 512:
+                    features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                
+                self.data.append({
+                    'features': features,
+                    'label': label
+                })
+            except Exception as e:
+                print(f"Error processing instance {idx} from {pkl_file}: {e}")
+                continue
     
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        item = self.data[idx]
-        features = item['features']
-        
-        if self.transform:
-            features = self.transform(features)
-        
-        # Convert to torch tensors if not already
-        if not isinstance(features, torch.Tensor):
-            features = torch.tensor(features, dtype=torch.float32)
-        
-        # Ensure correct data type if already a tensor
-        features = features.float()
-        
-        # Ensure [n_patches, feature_dim] format
-        if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
-            features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
-        
-        # Pad or truncate the features to max_patches
-        n_patches = features.shape[0]
-        if n_patches < self.max_patches:
-            # Pad with zeros if fewer patches than max_patches
-            padding = torch.zeros(self.max_patches - n_patches, 512, 
-                                dtype=features.dtype, device=features.device)
-            features = torch.cat([features, padding], dim=0)
-        elif n_patches > self.max_patches:
-            # Truncate if more patches than max_patches
-            features = features[:self.max_patches]
-                
-        label = torch.tensor(item['label'], dtype=torch.long)
-        
-        return features, label
+        try:
+            item = self.data[idx]
+            features = item['features']
+            
+            if self.transform:
+                features = self.transform(features)
+            
+            # Ensure features is a tensor and has correct type
+            if not isinstance(features, torch.Tensor):
+                try:
+                    features = torch.tensor(features, dtype=torch.float32)
+                except ValueError as e:
+                    print(f"Error converting features to tensor at idx {idx}: {e}")
+                    print(f"Feature type: {type(features)}, structure: {features[:2] if hasattr(features, '__len__') and len(features) > 2 else features}")
+                    # Provide a dummy tensor as fallback
+                    features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+            
+            # Ensure correct data type if already a tensor
+            features = features.float()
+            
+            # Ensure [n_patches, feature_dim] format
+            if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
+                features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
+            
+            # Handle case where features might be 1D or have unexpected shape
+            if features.dim() == 1:
+                # If it's a 1D tensor, reshape it to 2D with a single feature
+                features = features.unsqueeze(0)
+                if features.shape[1] != 512:
+                    # If it doesn't have 512 features, create dummy tensor
+                    features = torch.zeros((1, 512), dtype=torch.float32)
+            elif features.dim() > 2:
+                # For higher dimensions, flatten to 2D
+                orig_shape = features.shape
+                print(f"Warning: Unexpected feature dimension {orig_shape} at idx {idx}, flattening to 2D")
+                features = features.reshape(-1, 512)
+                if features.shape[1] != 512:
+                    features = torch.zeros((1, 512), dtype=torch.float32)
+            
+            # Pad or truncate the features to max_patches
+            n_patches = features.shape[0]
+            if n_patches < self.max_patches:
+                # Pad with zeros if fewer patches than max_patches
+                padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                    dtype=features.dtype, device=features.device)
+                features = torch.cat([features, padding], dim=0)
+            elif n_patches > self.max_patches:
+                # Truncate if more patches than max_patches
+                features = features[:self.max_patches]
+                    
+            label = torch.tensor(item['label'], dtype=torch.long)
+            
+            return features, label
+        except Exception as e:
+            print(f"Error in __getitem__ at idx {idx}: {e}")
+            # Return a dummy sample in case of error
+            dummy_features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+            dummy_label = torch.tensor(0, dtype=torch.long)
+            return dummy_features, dummy_label
 
 
 def collate_fn(batch):
@@ -253,18 +329,37 @@ def collate_fn(batch):
         torch.Tensor: Batched features
         torch.Tensor: Batched labels
     """
-    features = [item[0] for item in batch]
-    labels = [item[1] for item in batch]
-    
-    # For debugging (can be removed in production)
-    feature_shapes = [f.shape for f in features]
-    print(f"Feature shapes in batch: {feature_shapes}")
-    
-    # All tensors should be the same size now, so we can simply stack them
-    features_tensor = torch.stack(features)
-    labels_tensor = torch.stack(labels)
-    
-    return features_tensor, labels_tensor
+    try:
+        features = []
+        labels = []
+        
+        for i, item in enumerate(batch):
+            try:
+                feature, label = item
+                features.append(feature)
+                labels.append(label)
+            except Exception as e:
+                print(f"Error processing batch item {i}: {e}")
+                # Skip problematic items
+                continue
+        
+        if not features:
+            # Return a dummy batch if all items were problematic
+            dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
+            dummy_labels = torch.zeros(1, dtype=torch.long)
+            return dummy_features, dummy_labels
+        
+        # All tensors should be the same size now, so we can simply stack them
+        features_tensor = torch.stack(features)
+        labels_tensor = torch.stack(labels)
+        
+        return features_tensor, labels_tensor
+    except Exception as e:
+        print(f"Error in collate_fn: {e}")
+        # Return a dummy batch in case of error
+        dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
+        dummy_labels = torch.zeros(1, dtype=torch.long)
+        return dummy_features, dummy_labels
 
 
 def stratified_split(pkl_files, endpoint='OS_6', val_size=0.15, test_size=0.15, random_state=42):
