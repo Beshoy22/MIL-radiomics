@@ -146,7 +146,10 @@ def create_lstm_model(feature_dim=512, hidden_dim=128, num_layers=2, dropout=0.3
     # Initialize weights for better training stability
     for name, param in model.named_parameters():
         if 'weight' in name and 'lstm' not in name:  # Skip LSTM weights which have their own initialization
-            nn.init.kaiming_normal_(param)
+            if len(param.shape) >= 2:  # Only apply Kaiming initialization to parameters with at least 2 dimensions
+                nn.init.kaiming_normal_(param)
+            else:
+                nn.init.normal_(param, mean=0.0, std=0.01)  # Use normal initialization for 1D parameters
         elif 'bias' in name:
             nn.init.zeros_(param)
     
