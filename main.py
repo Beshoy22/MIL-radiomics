@@ -6,7 +6,7 @@ from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
 from lstm_mil_model import create_lstm_model
 from model_train import setup_training, train_model, evaluate_model
-from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
+from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve, plot_comparison_metrics
 
 
 def main(args):
@@ -93,11 +93,13 @@ def main(args):
         device=device
     )
     
-    # Evaluate model
-    print(f"Evaluating {args.model_type} model...")
+    # Evaluate model on all datasets
+    print(f"Evaluating {args.model_type} model on all datasets...")
     metrics = evaluate_model(
         model=model,
         test_loader=test_loader,
+        train_loader=train_loader,
+        val_loader=val_loader,
         criterion=criterion,
         device=device
     )
@@ -114,6 +116,8 @@ def main(args):
     plot_training_curves(history, args.output_dir)
     plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir)
     plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir)
+    # Plot comparison metrics across datasets
+    plot_comparison_metrics(metrics, args.output_dir)
     
     return model, metrics, history
 

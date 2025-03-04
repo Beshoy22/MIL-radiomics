@@ -42,10 +42,28 @@ def save_model_and_results(model, metrics, history, output_dir):
     # Save model
     torch.save(model.state_dict(), os.path.join(output_dir, 'model.pt'))
     
-    # Save metrics (exclude numpy arrays from JSON)
+    # Process metrics for each dataset for JSON saving
     metrics_json = {}
+    
+    # Handle the case of both the legacy format and the new comprehensive format
+    if 'all_datasets' in metrics:
+        # New format with multiple datasets
+        for dataset_name, dataset_metrics in metrics['all_datasets'].items():
+            dataset_metrics_json = {}
+            for k, v in dataset_metrics.items():
+                if k in ['confusion_matrix', 'all_labels', 'all_preds', 'all_probs']:
+                    continue
+                if isinstance(v, np.ndarray):
+                    dataset_metrics_json[k] = v.tolist()
+                elif isinstance(v, np.float64) or isinstance(v, np.float32):
+                    dataset_metrics_json[k] = float(v)
+                else:
+                    dataset_metrics_json[k] = v
+            metrics_json[dataset_name] = dataset_metrics_json
+    
+    # Also save the legacy top-level metrics for backward compatibility
     for k, v in metrics.items():
-        if k in ['confusion_matrix', 'all_labels', 'all_preds', 'all_probs']:
+        if k in ['confusion_matrix', 'all_labels', 'all_preds', 'all_probs', 'all_datasets']:
             continue
         if isinstance(v, np.ndarray):
             metrics_json[k] = v.tolist()
@@ -154,6 +172,75 @@ def plot_training_curves(history, output_dir=None):
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'training_curves.png'))
+    
+    plt.show()
+
+
+def plot_comparison_metrics(metrics, output_dir=None):
+    """
+    Plot comparison of key metrics across train, validation, and test sets.
+    
+    Args:
+        metrics (dict): Metrics dictionary with 'all_datasets' key
+        output_dir (str, optional): Directory to save plots
+    """
+    if 'all_datasets' not in metrics:
+        print("No comprehensive metrics available for comparison.")
+        return
+    
+    # Extract datasets and metrics
+    datasets = []
+    accuracy = []
+    f1_macro = []
+    f1_weighted = []
+    auc_scores = []
+    
+    for dataset_name in ['train', 'val', 'test']:
+        if dataset_name in metrics['all_datasets']:
+            datasets.append(dataset_name.capitalize())
+            ds_metrics = metrics['all_datasets'][dataset_name]
+            accuracy.append(ds_metrics['accuracy'] * 100)  # Convert to percentage
+            f1_macro.append(ds_metrics['f1_macro'])
+            f1_weighted.append(ds_metrics['f1_weighted'])
+            auc_scores.append(ds_metrics['auc'])
+    
+    if not datasets:
+        print("No dataset metrics available for comparison.")
+        return
+    
+    # Create plot with 4 subplots
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle('Comparison of Metrics Across Datasets', fontsize=16)
+    
+    # Accuracy plot
+    axs[0, 0].bar(datasets, accuracy, color='skyblue')
+    axs[0, 0].set_title('Accuracy (%)')
+    axs[0, 0].set_ylim(0, 100)
+    axs[0, 0].grid(axis='y', alpha=0.3)
+    
+    # F1 Macro plot
+    axs[0, 1].bar(datasets, f1_macro, color='lightgreen')
+    axs[0, 1].set_title('F1 Macro')
+    axs[0, 1].set_ylim(0, 1)
+    axs[0, 1].grid(axis='y', alpha=0.3)
+    
+    # F1 Weighted plot
+    axs[1, 0].bar(datasets, f1_weighted, color='salmon')
+    axs[1, 0].set_title('F1 Weighted')
+    axs[1, 0].set_ylim(0, 1)
+    axs[1, 0].grid(axis='y', alpha=0.3)
+    
+    # AUC plot
+    axs[1, 1].bar(datasets, auc_scores, color='plum')
+    axs[1, 1].set_title('AUC')
+    axs[1, 1].set_ylim(0, 1)
+    axs[1, 1].grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(os.path.join(output_dir, 'dataset_comparison.png'))
     
     plt.show()
 

@@ -181,14 +181,17 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
 
 
 def evaluate_model(model, test_loader, criterion=None, 
+                  train_loader=None, val_loader=None,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
-    Evaluate the model on test data.
+    Evaluate the model on test data, and optionally on training and validation data.
     
     Args:
         model (nn.Module): Trained model
         test_loader (DataLoader): Test data loader
         criterion: Loss function (optional)
+        train_loader (DataLoader, optional): Training data loader for reporting train metrics
+        val_loader (DataLoader, optional): Validation data loader for reporting validation metrics
         device (str): Device to use for evaluation
         
     Returns:
@@ -197,86 +200,125 @@ def evaluate_model(model, test_loader, criterion=None,
     model = model.to(device)
     model.eval()
     
-    test_loss = 0.0
-    all_labels = []
-    all_preds = []
-    all_probs = []
+    # Function to evaluate on a specific dataloader
+    def evaluate_dataloader(dataloader, name):
+        loss_val = 0.0
+        all_labels = []
+        all_preds = []
+        all_probs = []
+        
+        # Use tqdm for progress tracking
+        dataloader_tqdm = tqdm(dataloader, desc=f"Evaluating {name}")
+        
+        with torch.no_grad():
+            for features, labels in dataloader_tqdm:
+                features, labels = features.to(device), labels.to(device)
+                
+                outputs = model(features)
+                
+                if criterion is not None:
+                    loss = criterion(outputs, labels)
+                    loss_val += loss.item() * features.size(0)
+                    dataloader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
+                
+                # Get predictions and probabilities
+                probs = torch.softmax(outputs, dim=1)
+                _, preds = torch.max(outputs, 1)
+                
+                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(preds.cpu().numpy())
+                all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
+        
+        # Calculate metrics
+        if criterion is not None:
+            loss_val = loss_val / len(dataloader.dataset)
+        
+        all_labels = np.array(all_labels)
+        all_preds = np.array(all_preds)
+        all_probs = np.array(all_probs)
+        
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision = precision_score(all_labels, all_preds, zero_division=0)
+        recall = recall_score(all_labels, all_preds, zero_division=0)
+        f1 = f1_score(all_labels, all_preds, zero_division=0)
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+        
+        try:
+            auc = roc_auc_score(all_labels, all_probs)
+        except:
+            auc = 0.0  # In case of only one class
+        
+        cm = confusion_matrix(all_labels, all_preds)
+        
+        return {
+            'loss': loss_val if criterion is not None else None,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'f1_macro': f1_macro,
+            'f1_weighted': f1_weighted,
+            'auc': auc,
+            'confusion_matrix': cm,
+            'all_labels': all_labels,
+            'all_preds': all_preds,
+            'all_probs': all_probs
+        }
     
-    # Use tqdm for progress tracking
-    test_loader_tqdm = tqdm(test_loader, desc="Evaluating")
+    # Collect metrics for each dataset
+    metrics = {}
     
-    with torch.no_grad():
-        for features, labels in test_loader_tqdm:
-            features, labels = features.to(device), labels.to(device)
-            
-            outputs = model(features)
-            
-            if criterion is not None:
-                loss = criterion(outputs, labels)
-                test_loss += loss.item() * features.size(0)
-                test_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
-            
-            # Get predictions and probabilities
-            probs = torch.softmax(outputs, dim=1)
-            _, preds = torch.max(outputs, 1)
-            
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-            all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
+    # Evaluate on test set
+    test_metrics = evaluate_dataloader(test_loader, "test")
+    metrics['test'] = test_metrics
     
-    # Calculate metrics
-    if criterion is not None:
-        test_loss = test_loss / len(test_loader.dataset)
+    # Evaluate on training set if provided
+    if train_loader:
+        train_metrics = evaluate_dataloader(train_loader, "train")
+        metrics['train'] = train_metrics
     
-    all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
-    all_probs = np.array(all_probs)
+    # Evaluate on validation set if provided
+    if val_loader:
+        val_metrics = evaluate_dataloader(val_loader, "validation")
+        metrics['val'] = val_metrics
     
-    accuracy = accuracy_score(all_labels, all_preds)
-    precision = precision_score(all_labels, all_preds, zero_division=0)
-    recall = recall_score(all_labels, all_preds, zero_division=0)
-    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    # Print comprehensive metrics for all datasets
+    print("\n===== COMPREHENSIVE MODEL EVALUATION =====")
     
-    # Added F1 Macro and F1 Weighted calculations
-    f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-    f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    datasets = [('Train', 'train'), ('Validation', 'val'), ('Test', 'test')]
+    for name, key in datasets:
+        if key in metrics:
+            print(f"\n{name} metrics:")
+            if metrics[key]['loss'] is not None:
+                print(f"  Loss: {metrics[key]['loss']:.4f}")
+            print(f"  Accuracy: {metrics[key]['accuracy']:.4f}")
+            print(f"  Precision: {metrics[key]['precision']:.4f}")
+            print(f"  Recall: {metrics[key]['recall']:.4f}")
+            print(f"  F1 Score: {metrics[key]['f1']:.4f}")
+            print(f"  F1 Macro: {metrics[key]['f1_macro']:.4f}")
+            print(f"  F1 Weighted: {metrics[key]['f1_weighted']:.4f}")
+            print(f"  AUC: {metrics[key]['auc']:.4f}")
+            print(f"  Confusion Matrix:\n{metrics[key]['confusion_matrix']}")
     
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except:
-        auc = 0.0  # In case of only one class
-    
-    cm = confusion_matrix(all_labels, all_preds)
-    
-    metrics = {
-        'test_loss': test_loss if criterion is not None else None,
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'f1_macro': f1_macro,     # Added F1 Macro
-        'f1_weighted': f1_weighted, # Added F1 Weighted
-        'auc': auc,
-        'confusion_matrix': cm,
-        'all_labels': all_labels,
-        'all_preds': all_preds,
-        'all_probs': all_probs
+    # For backward compatibility, return test metrics at the top level
+    result = {
+        'test_loss': test_metrics['loss'],
+        'accuracy': test_metrics['accuracy'],
+        'precision': test_metrics['precision'],
+        'recall': test_metrics['recall'],
+        'f1': test_metrics['f1'],
+        'f1_macro': test_metrics['f1_macro'],
+        'f1_weighted': test_metrics['f1_weighted'],
+        'auc': test_metrics['auc'],
+        'confusion_matrix': test_metrics['confusion_matrix'],
+        'all_labels': test_metrics['all_labels'],
+        'all_preds': test_metrics['all_preds'],
+        'all_probs': test_metrics['all_probs'],
+        'all_datasets': metrics  # Include metrics for all datasets
     }
     
-    # Print metrics
-    print("Test metrics:")
-    if criterion is not None:
-        print(f"  Loss: {test_loss:.4f}")
-    print(f"  Accuracy: {accuracy:.4f}")
-    print(f"  Precision: {precision:.4f}")
-    print(f"  Recall: {recall:.4f}")
-    print(f"  F1 Score: {f1:.4f}")
-    print(f"  F1 Macro: {f1_macro:.4f}")        # Added F1 Macro output
-    print(f"  F1 Weighted: {f1_weighted:.4f}")  # Added F1 Weighted output
-    print(f"  AUC: {auc:.4f}")
-    print(f"  Confusion Matrix:\n{cm}")
-    
-    return metrics
+    return result
 
 
 def predict(model, dataloader, return_attention=False, 
