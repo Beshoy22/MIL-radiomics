@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from tqdm import tqdm
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, 
     f1_score, roc_auc_score, confusion_matrix
@@ -54,7 +55,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         train_correct = 0
         train_total = 0
         
-        for features, labels in train_loader:
+        # Use tqdm for progress bar
+        train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
+        
+        for features, labels in train_loader_tqdm:
             features, labels = features.to(device), labels.to(device)
             
             # Zero the parameter gradients
@@ -73,6 +77,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             _, predicted = torch.max(outputs, 1)
             train_correct += (predicted == labels).sum().item()
             train_total += labels.size(0)
+            
+            # Update progress bar
+            train_loader_tqdm.set_postfix(
+                loss=f"{loss.item():.4f}", 
+                acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
+            )
         
         # Calculate epoch statistics
         train_loss = train_loss / len(train_loader.dataset)
@@ -84,8 +94,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         val_correct = 0
         val_total = 0
         
+        # Use tqdm for progress bar
+        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+        
         with torch.no_grad():
-            for features, labels in val_loader:
+            for features, labels in val_loader_tqdm:
                 features, labels = features.to(device), labels.to(device)
                 
                 outputs = model(features)
@@ -95,6 +108,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 _, predicted = torch.max(outputs, 1)
                 val_correct += (predicted == labels).sum().item()
                 val_total += labels.size(0)
+                
+                # Update progress bar
+                val_loader_tqdm.set_postfix(
+                    loss=f"{loss.item():.4f}", 
+                    acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
+                )
         
         val_loss = val_loss / len(val_loader.dataset)
         val_acc = 100 * val_correct / val_total
@@ -167,8 +186,11 @@ def evaluate_model(model, test_loader, criterion=None,
     all_preds = []
     all_probs = []
     
+    # Use tqdm for progress tracking
+    test_loader_tqdm = tqdm(test_loader, desc="Evaluating")
+    
     with torch.no_grad():
-        for features, labels in test_loader:
+        for features, labels in test_loader_tqdm:
             features, labels = features.to(device), labels.to(device)
             
             outputs = model(features)
@@ -176,6 +198,7 @@ def evaluate_model(model, test_loader, criterion=None,
             if criterion is not None:
                 loss = criterion(outputs, labels)
                 test_loss += loss.item() * features.size(0)
+                test_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
             
             # Get predictions and probabilities
             probs = torch.softmax(outputs, dim=1)
@@ -254,8 +277,11 @@ def predict(model, dataloader, return_attention=False,
     all_probs = []
     all_attns = []
     
+    # Use tqdm for progress tracking
+    dataloader_tqdm = tqdm(dataloader, desc="Predicting")
+    
     with torch.no_grad():
-        for features, labels in dataloader:
+        for features, labels in dataloader_tqdm:
             features, labels = features.to(device), labels.to(device)
             
             # Forward pass with or without attention weights

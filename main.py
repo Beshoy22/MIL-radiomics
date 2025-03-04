@@ -31,7 +31,9 @@ def main(args):
         val_size=args.val_size,
         test_size=args.test_size,
         num_workers=args.num_workers,
-        seed=args.seed
+        seed=args.seed,
+        use_cache=args.use_cache,
+        cache_dir=args.cache_dir
     )
     print(f"Data loaders ready")
     
@@ -102,9 +104,13 @@ if __name__ == "__main__":
     # Data arguments
     parser.add_argument('--data_dir', type=str, required=True, help='Directory containing .pkl files')
     parser.add_argument('--endpoint', type=str, default='OS_6', choices=['OS_6', 'OS_24'], help='Endpoint to use')
-    parser.add_argument('--oversample_factor', type=float, default=1.0, help='Factor for oversampling minority class')
+    parser.add_argument('--oversample_factor', type=float, default=1.0, help='Factor for oversampling minority class (0 to disable)')
     parser.add_argument('--val_size', type=float, default=0.15, help='Validation set size')
     parser.add_argument('--test_size', type=float, default=0.15, help='Test set size')
+    
+    # Caching arguments
+    parser.add_argument('--use_cache', action='store_true', help='Use in-memory caching for faster loading')
+    parser.add_argument('--cache_dir', type=str, default=None, help='Directory to store cached data files')
     
     # Model arguments
     parser.add_argument('--feature_dim', type=int, default=512, help='Dimension of input features')
@@ -130,6 +136,10 @@ if __name__ == "__main__":
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create cache directory if specified and doesn't exist
+    if args.cache_dir:
+        os.makedirs(args.cache_dir, exist_ok=True)
     
     # Run main function
     main(args)
