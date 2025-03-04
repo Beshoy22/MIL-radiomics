@@ -292,8 +292,18 @@ class SplitDataset(Dataset):
         if self.transform:
             features = self.transform(features)
         
-        # Convert to torch tensors
-        features = torch.tensor(features, dtype=torch.float32)
+        # Convert to torch tensors - handle both numpy arrays and tensors
+        if not isinstance(features, torch.Tensor):
+            try:
+                features = torch.tensor(features, dtype=torch.float32)
+            except ValueError:
+                # This occurs if features is not a simple scalar or array
+                # We'll do a safer conversion with explicit numpy conversion first
+                import numpy as np
+                features = torch.tensor(np.array(features), dtype=torch.float32)
+        else:
+            # Ensure correct data type if already a tensor
+            features = features.float()
         
         # Check if we need to transpose features
         if features.dim() == 2 and features.shape[0] < features.shape[1]:
@@ -482,11 +492,33 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
         dtype=torch.float32
     )
     
-    # Get max patches from training data
-    sample_features, _ = train_dataset[0]
-    samples = [train_dataset[i] for i in range(min(10, len(train_dataset)))]
-    max_patches = max(sample[0].shape[0] for sample in samples)
-    print(f"Using max_patches={max_patches} based on training data sample")
+    # Get max patches from training data - with error handling
+    try:
+        samples = []
+        # Try to sample up to 10 instances
+        sample_size = min(10, len(train_dataset))
+        print(f"Sampling {sample_size} instances to determine max_patches...")
+        
+        for i in range(sample_size):
+            try:
+                sample = train_dataset[i]
+                samples.append(sample)
+            except Exception as e:
+                print(f"Warning: Could not load sample {i}: {e}")
+                continue
+                
+        if samples:
+            max_patches = max(sample[0].shape[0] for sample in samples)
+            print(f"Using max_patches={max_patches} based on {len(samples)} training samples")
+        else:
+            # Fallback value if no samples could be loaded
+            max_patches = 1000
+            print(f"Warning: Could not determine max_patches from samples. Using fallback value of {max_patches}")
+    except Exception as e:
+        # Ultimate fallback if the sampling process itself fails
+        max_patches = 1000
+        print(f"Error determining max_patches: {e}")
+        print(f"Using fallback value of {max_patches}")
     
     return (
         train_loader, 
