@@ -13,13 +13,14 @@ from sklearn.model_selection import train_test_split
 class PatchEmbeddingsDataset(Dataset):
     """Dataset for loading patch embeddings from CT scans stored in .pkl files"""
     
-    def __init__(self, pkl_files, endpoint='OS_6', transform=None, cache_dir=None):
+    def __init__(self, pkl_files, endpoint='OS_6', transform=None, cache_dir=None, max_patches=300):
         """
         Args:
             pkl_files (list): List of paths to .pkl files
             endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
             transform (callable, optional): Optional transform to be applied on features
             cache_dir (str, optional): Directory to cache processed data
+            max_patches (int): Maximum number of patches for padding (fixed based on analysis)
         """
         self.endpoint = endpoint
         self.transform = transform
@@ -27,6 +28,7 @@ class PatchEmbeddingsDataset(Dataset):
         self.centers = []
         self.cache_dir = cache_dir
         self.cache = {}  # Memory cache for faster access
+        self.max_patches = max_patches  # Fixed based on dataset analysis
         
         # Create cache directory if specified and doesn't exist
         if cache_dir and not os.path.exists(cache_dir):
@@ -66,6 +68,14 @@ class PatchEmbeddingsDataset(Dataset):
                         # Get features and ensure they're the right shape
                         features = instance['features']  # 512 x n_patches embeddings
                         
+                        # Convert features to torch tensor for manipulation
+                        if not isinstance(features, torch.Tensor):
+                            features = torch.tensor(features, dtype=torch.float32)
+                        
+                        # Transpose if in [feature_dim, n_patches] format
+                        if features.dim() == 2 and features.shape[0] == 512:
+                            features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                        
                         # Get label
                         label = instance[self.endpoint]  # Get the specified endpoint
                         
@@ -96,6 +106,7 @@ class PatchEmbeddingsDataset(Dataset):
                 continue
                 
         print(f"Loaded {len(self.data)} samples from {len(pkl_files)} files")
+        print(f"Using fixed max_patches = {self.max_patches} based on dataset analysis")
     
     def __len__(self):
         return len(self.data)
@@ -107,20 +118,153 @@ class PatchEmbeddingsDataset(Dataset):
         if self.transform:
             features = self.transform(features)
         
-        # Convert to torch tensors
+        # Convert to torch tensors if not already
         if not isinstance(features, torch.Tensor):
             features = torch.tensor(features, dtype=torch.float32)
-        else:
-            features = features.float()
         
-        # Explicitly check and transpose if necessary to ensure [n_patches, feature_dim] format
-        # If features has shape [feature_dim, n_patches] where feature_dim is 512
-        if features.dim() == 2 and features.shape[0] == 512:
+        # Ensure correct data type if already a tensor
+        features = features.float()
+        
+        # Ensure [n_patches, feature_dim] format
+        if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
             features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
+        
+        # Pad or truncate the features to max_patches
+        n_patches = features.shape[0]
+        if n_patches < self.max_patches:
+            # Pad with zeros if fewer patches than max_patches
+            padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                dtype=features.dtype, device=features.device)
+            features = torch.cat([features, padding], dim=0)
+        elif n_patches > self.max_patches:
+            # Truncate if more patches than max_patches
+            features = features[:self.max_patches]
                 
         label = torch.tensor(item['label'], dtype=torch.long)
         
         return features, label
+
+
+class SplitDataset(Dataset):
+    """Dataset for a specific split (train, val, or test)"""
+    
+    def __init__(self, split_data, split_type, endpoint='OS_6', transform=None, 
+                use_cache=True, max_patches=300):
+        """
+        Args:
+            split_data (dict): Output from stratified_split function
+            split_type (str): 'train', 'val', or 'test'
+            endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
+            transform (callable, optional): Optional transform to be applied on features
+            use_cache (bool): Whether to cache data in memory
+            max_patches (int): Maximum number of patches for padding (fixed based on analysis)
+        """
+        self.endpoint = endpoint
+        self.transform = transform
+        self.instances = split_data[split_type]
+        self.labels = split_data[f'{split_type}_labels']
+        self.use_cache = use_cache
+        self.data_cache = {} if use_cache else None
+        self.max_patches = max_patches  # Fixed based on dataset analysis
+        
+        # Load the actual data
+        self.data = []
+        print(f"Loading {split_type} data with max_patches = {self.max_patches}...")
+        
+        # Use tqdm for progress tracking
+        for i, ((pkl_file, idx), label) in enumerate(tqdm(zip(self.instances, self.labels), 
+                                                          desc=f"Loading {split_type} set", 
+                                                          total=len(self.instances))):
+            # Check if this pkl_file is already in cache
+            if self.use_cache and pkl_file in self.data_cache:
+                instances_list = self.data_cache[pkl_file]
+            else:
+                with open(pkl_file, 'rb') as f:
+                    # Load the list of dictionaries from the pickle file
+                    instances_list = pickle.load(f)
+                    if self.use_cache:
+                        self.data_cache[pkl_file] = instances_list
+                
+            # Get the specific instance at the given index
+            instance = instances_list[idx]
+            
+            # Extract features
+            features = instance['features']
+            
+            # Convert features to torch tensor for manipulation
+            if not isinstance(features, torch.Tensor):
+                features = torch.tensor(features, dtype=torch.float32)
+            
+            # Transpose if in [feature_dim, n_patches] format
+            if features.dim() == 2 and features.shape[0] == 512:
+                features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
+            
+            self.data.append({
+                'features': features,
+                'label': label
+            })
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        features = item['features']
+        
+        if self.transform:
+            features = self.transform(features)
+        
+        # Convert to torch tensors if not already
+        if not isinstance(features, torch.Tensor):
+            features = torch.tensor(features, dtype=torch.float32)
+        
+        # Ensure correct data type if already a tensor
+        features = features.float()
+        
+        # Ensure [n_patches, feature_dim] format
+        if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
+            features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
+        
+        # Pad or truncate the features to max_patches
+        n_patches = features.shape[0]
+        if n_patches < self.max_patches:
+            # Pad with zeros if fewer patches than max_patches
+            padding = torch.zeros(self.max_patches - n_patches, 512, 
+                                dtype=features.dtype, device=features.device)
+            features = torch.cat([features, padding], dim=0)
+        elif n_patches > self.max_patches:
+            # Truncate if more patches than max_patches
+            features = features[:self.max_patches]
+                
+        label = torch.tensor(item['label'], dtype=torch.long)
+        
+        return features, label
+
+
+def collate_fn(batch):
+    """
+    Simplified collate function that stacks the pre-padded tensors.
+    Since all tensors are pre-padded to the same size, we don't need custom padding here.
+    
+    Args:
+        batch (list): List of (features, label) tuples
+        
+    Returns:
+        torch.Tensor: Batched features
+        torch.Tensor: Batched labels
+    """
+    features = [item[0] for item in batch]
+    labels = [item[1] for item in batch]
+    
+    # For debugging (can be removed in production)
+    feature_shapes = [f.shape for f in features]
+    print(f"Feature shapes in batch: {feature_shapes}")
+    
+    # All tensors should be the same size now, so we can simply stack them
+    features_tensor = torch.stack(features)
+    labels_tensor = torch.stack(labels)
+    
+    return features_tensor, labels_tensor
 
 
 def stratified_split(pkl_files, endpoint='OS_6', val_size=0.15, test_size=0.15, random_state=42):
@@ -237,160 +381,6 @@ def stratified_split(pkl_files, endpoint='OS_6', val_size=0.15, test_size=0.15, 
     }
 
 
-class SplitDataset(Dataset):
-    """Dataset for a specific split (train, val, or test)"""
-    
-    def __init__(self, split_data, split_type, endpoint='OS_6', transform=None, use_cache=True):
-        """
-        Args:
-            split_data (dict): Output from stratified_split function
-            split_type (str): 'train', 'val', or 'test'
-            endpoint (str): Which endpoint to use, 'OS_6' or 'OS_24'
-            transform (callable, optional): Optional transform to be applied on features
-            use_cache (bool): Whether to cache data in memory
-        """
-        self.endpoint = endpoint
-        self.transform = transform
-        self.instances = split_data[split_type]
-        self.labels = split_data[f'{split_type}_labels']
-        self.use_cache = use_cache
-        self.data_cache = {} if use_cache else None
-        
-        # Load the actual data
-        self.data = []
-        print(f"Loading {split_type} data...")
-        
-        # Use tqdm for progress tracking
-        for i, ((pkl_file, idx), label) in enumerate(tqdm(zip(self.instances, self.labels), 
-                                                          desc=f"Loading {split_type} set", 
-                                                          total=len(self.instances))):
-            # Check if this pkl_file is already in cache
-            if self.use_cache and pkl_file in self.data_cache:
-                instances_list = self.data_cache[pkl_file]
-            else:
-                with open(pkl_file, 'rb') as f:
-                    # Load the list of dictionaries from the pickle file
-                    instances_list = pickle.load(f)
-                    if self.use_cache:
-                        self.data_cache[pkl_file] = instances_list
-                
-            # Get the specific instance at the given index
-            instance = instances_list[idx]
-            
-            # Extract features
-            features = instance['features']
-            
-            self.data.append({
-                'features': features,
-                'label': label
-            })
-    
-    def __len__(self):
-        return len(self.data)
-    
-    # Update the __getitem__ method in SplitDataset class
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        features = item['features']
-        
-        if self.transform:
-            features = self.transform(features)
-        
-        # Convert to torch tensors
-        if not isinstance(features, torch.Tensor):
-            try:
-                # First ensure features is a numpy array to handle list-of-lists or other formats
-                if not isinstance(features, np.ndarray):
-                    features = np.array(features)
-                features = torch.tensor(features, dtype=torch.float32)
-            except Exception as e:
-                # More detailed error reporting
-                raise ValueError(f"Error converting features to tensor: {e}. Features type: {type(features)}, shape: {np.shape(features) if hasattr(features, 'shape') else 'unknown'}")
-        else:
-            # Ensure correct data type if already a tensor
-            features = features.float()
-        
-        # IMPORTANT: Check and transpose if necessary to ensure [n_patches, feature_dim] format
-        # If features has shape [feature_dim, n_patches], transpose it
-        if features.dim() == 2 and features.shape[0] == 512:  # 512 is the feature_dim
-            features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
-                
-        label = torch.tensor(item['label'], dtype=torch.long)
-        
-        return features, label
-
-
-# Update the collate_fn function
-def collate_fn(batch):
-    """
-    Custom collate function to handle variable number of patches.
-    
-    Args:
-        batch (list): List of (features, label) tuples
-        
-    Returns:
-        torch.Tensor: Batched features
-        torch.Tensor: Batched labels
-    """
-    features = [item[0] for item in batch]
-    labels = [item[1] for item in batch]
-    
-    # For debugging (can be removed in production)
-    feature_shapes = [f.shape for f in features]
-    print(f"Feature shapes in batch: {feature_shapes}")
-    
-    # Ensure all features have the same dimensionality structure - should be [n_patches, feature_dim]
-    processed_features = []
-    for f in features:
-        # Explicitly check for the case where features are still in [feature_dim, n_patches] format
-        if f.dim() == 2 and f.shape[1] == 512:  # If the second dimension is 512 (feature_dim)
-            processed_features.append(f)  # Already in correct format
-        elif f.dim() == 2 and f.shape[0] == 512:  # If features are [feature_dim, n_patches]
-            processed_features.append(f.transpose(0, 1))  # Transpose to [n_patches, feature_dim]
-        else:
-            # For any other case, ensure it's in correct shape
-            if f.dim() == 2:
-                # Check which dimension is likely to be feature_dim 
-                # (assume the dimension closer to 512 is the feature dimension)
-                if abs(f.shape[0] - 512) < abs(f.shape[1] - 512):
-                    # First dimension is likely feature_dim
-                    processed_features.append(f.transpose(0, 1))
-                else:
-                    # Second dimension is likely feature_dim
-                    processed_features.append(f)
-            else:
-                raise ValueError(f"Unexpected feature shape: {f.shape}. Expected 2D tensor.")
-    
-    # Get the dimensions for padding
-    max_patches = max(f.shape[0] for f in processed_features)
-    feature_dim = processed_features[0].shape[1]  # Assuming all have same feature dimension
-    
-    print(f"Padding to max_patches={max_patches}, feature_dim={feature_dim}")
-    
-    # Pad each feature tensor to have the same number of patches
-    padded_features = []
-    for f in processed_features:
-        n_patches = f.shape[0]
-        if n_patches < max_patches:
-            # Create padding
-            padding = torch.zeros(max_patches - n_patches, feature_dim, dtype=f.dtype, device=f.device)
-            # Concatenate with original tensor along patch dimension
-            padded_f = torch.cat([f, padding], dim=0)
-        else:
-            padded_f = f
-        padded_features.append(padded_f)
-    
-    # Stack the padded features and labels
-    try:
-        features_tensor = torch.stack(padded_features)
-        labels_tensor = torch.stack(labels)
-        return features_tensor, labels_tensor
-    except RuntimeError as e:
-        # More detailed error message
-        shapes = [pf.shape for pf in padded_features]
-        raise RuntimeError(f"Failed to stack tensors with shapes: {shapes}. Original error: {e}")
-
-
 def create_weighted_sampler(labels, oversample_factor=1.0):
     """
     Create a weighted random sampler for oversampling the minority class.
@@ -448,7 +438,7 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
         cache_dir (str, optional): Directory to cache processed data
     
     Returns:
-        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics)
+        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics, max_patches)
     """
     # Get all .pkl files in the directory
     pkl_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.pkl')]
@@ -470,10 +460,17 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
     print(f"  Validation: {metrics['val_count']} samples, {dict(metrics['val_label_counts'])}")
     print(f"  Test: {metrics['test_count']} samples, {dict(metrics['test_label_counts'])}")
     
-    # Create datasets for each split
-    train_dataset = SplitDataset(split_data, 'train', endpoint=endpoint, use_cache=use_cache)
-    val_dataset = SplitDataset(split_data, 'val', endpoint=endpoint, use_cache=use_cache)
-    test_dataset = SplitDataset(split_data, 'test', endpoint=endpoint, use_cache=use_cache)
+    # Use fixed max_patches based on dataset analysis
+    max_patches = 300  # Replace with the actual value from your analysis
+    print(f"Using fixed max_patches = {max_patches} based on dataset analysis")
+    
+    # Create datasets for each split with the fixed max_patches
+    train_dataset = SplitDataset(split_data, 'train', endpoint=endpoint, 
+                                use_cache=use_cache, max_patches=max_patches)
+    val_dataset = SplitDataset(split_data, 'val', endpoint=endpoint, 
+                              use_cache=use_cache, max_patches=max_patches)
+    test_dataset = SplitDataset(split_data, 'test', endpoint=endpoint, 
+                               use_cache=use_cache, max_patches=max_patches)
     
     # Create weighted sampler for handling class imbalance if oversampling is enabled
     train_sampler = None
@@ -486,7 +483,7 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
     else:
         shuffle = True  # Shuffle when not using sampler
     
-    # Create data loaders
+    # Create data loaders with our simplified collate_fn
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -522,34 +519,6 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
         [total_samples / (len(class_counts) * count) for label, count in sorted(class_counts.items())],
         dtype=torch.float32
     )
-    
-    # Get max patches from training data - with error handling
-    try:
-        samples = []
-        # Try to sample up to 10 instances
-        sample_size = min(10, len(train_dataset))
-        print(f"Sampling {sample_size} instances to determine max_patches...")
-        
-        for i in range(sample_size):
-            try:
-                sample = train_dataset[i]
-                samples.append(sample)
-            except Exception as e:
-                print(f"Warning: Could not load sample {i}: {e}")
-                continue
-                
-        if samples:
-            max_patches = max(sample[0].shape[0] for sample in samples)
-            print(f"Using max_patches={max_patches} based on {len(samples)} training samples")
-        else:
-            # Fallback value if no samples could be loaded
-            max_patches = 1000
-            print(f"Warning: Could not determine max_patches from samples. Using fallback value of {max_patches}")
-    except Exception as e:
-        # Ultimate fallback if the sampling process itself fails
-        max_patches = 1000
-        print(f"Error determining max_patches: {e}")
-        print(f"Using fallback value of {max_patches}")
     
     return (
         train_loader, 
