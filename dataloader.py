@@ -59,39 +59,83 @@ def process_pkl_file(pkl_file, endpoint):
             instances_list = pickle.load(f)
             center = os.path.basename(pkl_file)  # Use filename as center identifier
             
-            for instance in instances_list:
-                # Skip instances without the specified endpoint
-                if endpoint not in instance:
+            for idx, instance in enumerate(instances_list):
+                try:
+                    # Skip instances without the specified endpoint
+                    if endpoint not in instance:
+                        continue
+                    
+                    # Get features and ensure they're the right shape
+                    features = instance['features']
+                    
+                    # Convert features to torch tensor for manipulation
+                    if not isinstance(features, torch.Tensor):
+                        try:
+                            features = torch.tensor(features, dtype=torch.float32)
+                        except Exception as e:
+                            print(f"Warning: Could not convert features to tensor in {pkl_file}, instance {idx}: {e}")
+                            continue
+                    
+                    # Transpose if in [feature_dim, n_patches] format
+                    if features.dim() == 2 and features.shape[0] == 512:
+                        features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                    
+                    # Update max_patches
+                    n_patches = features.shape[0]
+                    max_patches = max(max_patches, n_patches)
+                    
+                    # Get label and handle different types carefully
+                    label_value = instance[endpoint]  # Get the specified endpoint
+                    
+                    # Handle different types of label values
+                    if isinstance(label_value, (int, bool, np.int32, np.int64)):
+                        # For simple types, convert directly
+                        label = 1 if label_value else 0
+                    elif isinstance(label_value, torch.Tensor):
+                        # For tensors, extract a single value if possible
+                        if label_value.numel() == 1:
+                            # Single element tensor
+                            label = 1 if label_value.item() else 0
+                        else:
+                            # Multi-element tensor, use the first element or skip
+                            print(f"Warning: Multi-element label tensor in {pkl_file}, instance {idx}. Using first element.")
+                            try:
+                                label = 1 if label_value[0].item() else 0
+                            except:
+                                print(f"Warning: Could not extract label from tensor. Skipping instance.")
+                                continue
+                    elif isinstance(label_value, np.ndarray):
+                        # For numpy arrays, similar approach as tensors
+                        if label_value.size == 1:
+                            label = 1 if label_value.item() else 0
+                        else:
+                            print(f"Warning: Multi-element label array in {pkl_file}, instance {idx}. Using first element.")
+                            try:
+                                label = 1 if label_value.flatten()[0] else 0
+                            except:
+                                print(f"Warning: Could not extract label from array. Skipping instance.")
+                                continue
+                    else:
+                        # For other types, use truthiness
+                        print(f"Warning: Unexpected label type {type(label_value)} in {pkl_file}, instance {idx}.")
+                        try:
+                            label = 1 if label_value else 0
+                        except:
+                            print(f"Warning: Could not convert label to binary. Skipping instance.")
+                            continue
+                    
+                    instances.append({
+                        'features': features,
+                        'label': label,
+                        'center': center
+                    })
+                except Exception as e:
+                    print(f"Error processing instance {idx} in {pkl_file}: {e}")
                     continue
                 
-                # Get features and ensure they're the right shape
-                features = instance['features']
-                
-                # Convert features to torch tensor for manipulation
-                if not isinstance(features, torch.Tensor):
-                    features = torch.tensor(features, dtype=torch.float32)
-                
-                # Transpose if in [feature_dim, n_patches] format
-                if features.dim() == 2 and features.shape[0] == 512:
-                    features = features.transpose(0, 1)  # Now [n_patches, feature_dim]
-                
-                # Update max_patches
-                n_patches = features.shape[0]
-                max_patches = max(max_patches, n_patches)
-                
-                # Get label
-                label = instance[endpoint]  # Get the specified endpoint
-                
-                # Convert to binary if not already
-                if not isinstance(label, int):
-                    label = 1 if label else 0
-                
-                instances.append({
-                    'features': features,
-                    'label': label,
-                    'center': center
-                })
-                
+        if not instances:
+            print(f"Warning: No valid instances found in {pkl_file}")
+            
         return max_patches, instances
     except Exception as e:
         print(f"Error processing {pkl_file}: {e}")
@@ -312,7 +356,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
     return splits, metrics, max_patches, class_weights
 
 
-def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=0.0, 
+def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
                         val_size=0.15, test_size=0.15, num_workers=4, seed=42,
                         use_cache=True, cache_dir=None):
     """
@@ -430,7 +474,7 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
 
 
 # Keeping the existing functions that don't need to be changed
-def create_weighted_sampler(labels, oversample_factor=0.0):
+def create_weighted_sampler(labels, oversample_factor=1.0):
     """
     Create a weighted random sampler for oversampling the minority class.
     
