@@ -1,370 +1,181 @@
-import time
-import copy
+import os
+import argparse
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from tqdm import tqdm
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, 
-    f1_score, roc_auc_score, confusion_matrix
-)
+
+from dataloader import prepare_dataloaders
+from transformer_mil_model import create_model
+from lstm_mil_model import create_lstm_model
+from model_train import setup_training, train_model, evaluate_model
+from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, 
-                scheduler=None, num_epochs=100, early_stopping_patience=10,
-                device='cuda' if torch.cuda.is_available() else 'cpu'):
+def main(args):
     """
-    Train the model.
+    Main function to train and evaluate the MIL model.
     
     Args:
-        model (nn.Module): Model to train
-        train_loader (DataLoader): Training data loader
-        val_loader (DataLoader): Validation data loader
-        criterion: Loss function
-        optimizer: Optimizer
-        scheduler: Learning rate scheduler (optional)
-        num_epochs (int): Maximum number of epochs
-        early_stopping_patience (int): Patience for early stopping
-        device (str): Device to use for training
-        
-    Returns:
-        model: Trained model
-        dict: Training history
+        args: Command line arguments
     """
-    model = model.to(device)
-    best_val_loss = float('inf')
-    best_model_state = None
-    patience_counter = 0
+    # Set seed for reproducibility
+    set_seed(args.seed)
     
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_acc': [],
-        'val_acc': [],
-        'val_f1_macro': [],   # Added F1 Macro tracking
-        'val_f1_weighted': [] # Added F1 Weighted tracking
-    }
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    print(f"Using device: {device}")
     
-    start_time = time.time()
+    # Prepare data loaders
+    train_loader, val_loader, test_loader, class_weights, metrics, max_patches = prepare_dataloaders(
+        data_dir=args.data_dir,
+        endpoint=args.endpoint,
+        batch_size=args.batch_size,
+        oversample_factor=args.oversample_factor,
+        val_size=args.val_size,
+        test_size=args.test_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+        use_cache=args.use_cache,
+        cache_dir=args.cache_dir
+    )
+    print(f"Data loaders ready")
     
-    for epoch in range(num_epochs):
-        epoch_start_time = time.time()
-        
-        # Training phase
-        model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        
-        # Use tqdm for progress bar
-        train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
-        
-        for features, labels in train_loader_tqdm:
-            features, labels = features.to(device), labels.to(device)
-            
-            # Zero the parameter gradients
-            optimizer.zero_grad()
-            
-            # Forward pass
-            outputs = model(features)
-            loss = criterion(outputs, labels)
-            
-            # Backward pass and optimize
-            loss.backward()
-            optimizer.step()
-            
-            # Update statistics
-            train_loss += loss.item() * features.size(0)
-            _, predicted = torch.max(outputs, 1)
-            train_correct += (predicted == labels).sum().item()
-            train_total += labels.size(0)
-            
-            # Update progress bar
-            train_loader_tqdm.set_postfix(
-                loss=f"{loss.item():.4f}", 
-                acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
-            )
-        
-        # Calculate epoch statistics
-        train_loss = train_loss / len(train_loader.dataset)
-        train_acc = 100 * train_correct / train_total
-        
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        all_val_labels = []
-        all_val_preds = []
-        
-        # Use tqdm for progress bar
-        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
-        
-        with torch.no_grad():
-            for features, labels in val_loader_tqdm:
-                features, labels = features.to(device), labels.to(device)
-                
-                outputs = model(features)
-                loss = criterion(outputs, labels)
-                
-                val_loss += loss.item() * features.size(0)
-                _, predicted = torch.max(outputs, 1)
-                val_correct += (predicted == labels).sum().item()
-                val_total += labels.size(0)
-                
-                # Collect labels and predictions for F1 calculation
-                all_val_labels.extend(labels.cpu().numpy())
-                all_val_preds.extend(predicted.cpu().numpy())
-                
-                # Update progress bar
-                val_loader_tqdm.set_postfix(
-                    loss=f"{loss.item():.4f}", 
-                    acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
-                )
-        
-        # Calculate validation metrics
-        val_loss = val_loss / len(val_loader.dataset)
-        val_acc = 100 * val_correct / val_total
-        
-        # Calculate F1 scores
-        val_f1_macro = f1_score(all_val_labels, all_val_preds, average='macro', zero_division=0)
-        val_f1_weighted = f1_score(all_val_labels, all_val_preds, average='weighted', zero_division=0)
-        
-        # Update learning rate
-        if scheduler is not None:
-            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(val_loss)
-            else:
-                scheduler.step()
-        
-        # Store statistics
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_acc'].append(train_acc)
-        history['val_acc'].append(val_acc)
-        history['val_f1_macro'].append(val_f1_macro)
-        history['val_f1_weighted'].append(val_f1_weighted)
-        
-        # Calculate time elapsed
-        epoch_time = time.time() - epoch_start_time
-        total_time = time.time() - start_time
-        
-        # Print progress with F1 scores
-        print(f'Epoch {epoch+1}/{num_epochs} | '
-              f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | '
-              f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% | '
-              f'F1 Macro: {val_f1_macro:.4f} | F1 Weighted: {val_f1_weighted:.4f} | '
-              f'Time: {epoch_time:.1f}s | Total: {total_time/60:.1f}m')
-        
-        # Check for improvement
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = copy.deepcopy(model.state_dict())
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            
-        # Early stopping
-        if patience_counter >= early_stopping_patience:
-            print(f'Early stopping at epoch {epoch+1}')
-            break
-    
-    # Load best model
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    
-    total_time = time.time() - start_time
-    print(f'Training completed in {total_time/60:.2f} minutes')
-    
-    return model, history
-
-
-def evaluate_model(model, test_loader, criterion=None, 
-                  device='cuda' if torch.cuda.is_available() else 'cpu'):
-    """
-    Evaluate the model on test data.
-    
-    Args:
-        model (nn.Module): Trained model
-        test_loader (DataLoader): Test data loader
-        criterion: Loss function (optional)
-        device (str): Device to use for evaluation
-        
-    Returns:
-        dict: Evaluation metrics
-    """
-    model = model.to(device)
-    model.eval()
-    
-    test_loss = 0.0
-    all_labels = []
-    all_preds = []
-    all_probs = []
-    
-    # Use tqdm for progress tracking
-    test_loader_tqdm = tqdm(test_loader, desc="Evaluating")
-    
-    with torch.no_grad():
-        for features, labels in test_loader_tqdm:
-            features, labels = features.to(device), labels.to(device)
-            
-            outputs = model(features)
-            
-            if criterion is not None:
-                loss = criterion(outputs, labels)
-                test_loss += loss.item() * features.size(0)
-                test_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
-            
-            # Get predictions and probabilities
-            probs = torch.softmax(outputs, dim=1)
-            _, preds = torch.max(outputs, 1)
-            
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-            all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
-    
-    # Calculate metrics
-    if criterion is not None:
-        test_loss = test_loss / len(test_loader.dataset)
-    
-    all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
-    all_probs = np.array(all_probs)
-    
-    accuracy = accuracy_score(all_labels, all_preds)
-    precision = precision_score(all_labels, all_preds, zero_division=0)
-    recall = recall_score(all_labels, all_preds, zero_division=0)
-    f1 = f1_score(all_labels, all_preds, zero_division=0)
-    
-    # Added F1 Macro and F1 Weighted calculations
-    f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
-    f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
-    
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except:
-        auc = 0.0  # In case of only one class
-    
-    cm = confusion_matrix(all_labels, all_preds)
-    
-    metrics = {
-        'test_loss': test_loss if criterion is not None else None,
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'f1_macro': f1_macro,     # Added F1 Macro
-        'f1_weighted': f1_weighted, # Added F1 Weighted
-        'auc': auc,
-        'confusion_matrix': cm,
-        'all_labels': all_labels,
-        'all_preds': all_preds,
-        'all_probs': all_probs
-    }
-    
-    # Print metrics
-    print("Test metrics:")
-    if criterion is not None:
-        print(f"  Loss: {test_loss:.4f}")
-    print(f"  Accuracy: {accuracy:.4f}")
-    print(f"  Precision: {precision:.4f}")
-    print(f"  Recall: {recall:.4f}")
-    print(f"  F1 Score: {f1:.4f}")
-    print(f"  F1 Macro: {f1_macro:.4f}")        # Added F1 Macro output
-    print(f"  F1 Weighted: {f1_weighted:.4f}")  # Added F1 Weighted output
-    print(f"  AUC: {auc:.4f}")
-    print(f"  Confusion Matrix:\n{cm}")
-    
-    return metrics
-
-
-def predict(model, dataloader, return_attention=False, 
-           device='cuda' if torch.cuda.is_available() else 'cpu'):
-    """
-    Make predictions using a trained model.
-    
-    Args:
-        model (nn.Module): Trained model
-        dataloader (DataLoader): DataLoader with data
-        return_attention (bool): Whether to return attention weights
-        device (str): Device to use for inference
-        
-    Returns:
-        tuple: (labels, predictions, probabilities, attention_weights) if return_attention=True
-               (labels, predictions, probabilities) otherwise
-    """
-    model = model.to(device)
-    model.eval()
-    all_labels = []
-    all_preds = []
-    all_probs = []
-    all_attns = []
-    
-    # Use tqdm for progress tracking
-    dataloader_tqdm = tqdm(dataloader, desc="Predicting")
-    
-    with torch.no_grad():
-        for features, labels in dataloader_tqdm:
-            features, labels = features.to(device), labels.to(device)
-            
-            # Forward pass with or without attention weights
-            if return_attention and hasattr(model, 'forward') and 'return_attn' in model.forward.__code__.co_varnames:
-                outputs, attn_weights = model(features, return_attn=True)
-                all_attns.extend(attn_weights.cpu().numpy())
-            else:
-                outputs = model(features)
-            
-            # Get predictions and probabilities
-            probs = torch.softmax(outputs, dim=1)
-            _, preds = torch.max(outputs, 1)
-            
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-            all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
-    
-    if return_attention:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_attns
+    # Create model based on model type
+    if args.model_type == 'transformer':
+        model = create_model(
+            feature_dim=args.feature_dim,
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            num_classes=len(class_weights),
+            max_patches=max_patches,
+            device=device
+        )
+        print(f"Transformer model ready")
+    elif args.model_type == 'lstm':
+        model = create_lstm_model(
+            feature_dim=args.feature_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            bidirectional=args.bidirectional,
+            num_classes=len(class_weights),
+            max_patches=max_patches,
+            device=device
+        )
+        print(f"LSTM model ready")
     else:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs)
-
-
-def setup_training(model, learning_rate=1e-4, weight_decay=1e-4, 
-                  class_weights=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    """
-    Set up loss function, optimizer, and scheduler for training.
+        raise ValueError(f"Unsupported model type: {args.model_type}")
     
-    Args:
-        model (nn.Module): Model to train
-        learning_rate (float): Learning rate
-        weight_decay (float): Weight decay for regularization
-        class_weights (torch.Tensor): Class weights for loss function
-        device (str): Device to use
-        
-    Returns:
-        tuple: (criterion, optimizer, scheduler)
-    """
-    # Move class weights to device if provided
-    if class_weights is not None:
-        class_weights = class_weights.to(device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-    else:
-        criterion = nn.CrossEntropyLoss()
+    # Print model architecture summary
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {num_params:,} trainable parameters")
     
-    # Create optimizer
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
+    # Set up training components
+    criterion, optimizer, scheduler = setup_training(
+        model=model,
+        learning_rate=args.lr,
+        weight_decay=args.weight_decay,
+        class_weights=class_weights,
+        device=device
     )
     
-    # Create scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
+    # Train model
+    print(f"Training {args.model_type} model...")
+    model, history = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        num_epochs=args.num_epochs,
+        early_stopping_patience=args.patience,
+        device=device
     )
     
-    return criterion, optimizer, scheduler
+    # Evaluate model
+    print(f"Evaluating {args.model_type} model...")
+    metrics = evaluate_model(
+        model=model,
+        test_loader=test_loader,
+        criterion=criterion,
+        device=device
+    )
+    
+    # Save model and results
+    save_model_and_results(
+        model=model,
+        metrics=metrics,
+        history=history,
+        output_dir=args.output_dir
+    )
+    
+    # Plot results
+    plot_training_curves(history, args.output_dir)
+    plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir)
+    plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir)
+    
+    return model, metrics, history
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Train MIL model for CT patch embeddings')
+    
+    # Model type
+    parser.add_argument('--model_type', type=str, default='transformer', 
+                        choices=['transformer', 'lstm'], help='Type of model to train')
+    
+    # Data arguments
+    parser.add_argument('--data_dir', type=str, required=True, help='Directory containing .pkl files')
+    parser.add_argument('--endpoint', type=str, default='OS_6', choices=['OS_6', 'OS_24'], 
+                        help='Endpoint to use')
+    parser.add_argument('--oversample_factor', type=float, default=1.0, 
+                        help='Factor for oversampling minority class (0 to disable)')
+    parser.add_argument('--val_size', type=float, default=0.15, help='Validation set size')
+    parser.add_argument('--test_size', type=float, default=0.15, help='Test set size')
+    
+    # Caching arguments
+    parser.add_argument('--use_cache', action='store_true', help='Use caching for faster loading')
+    parser.add_argument('--cache_dir', type=str, default=None, help='Directory to store cached data files')
+    
+    # Model arguments (common)
+    parser.add_argument('--feature_dim', type=int, default=512, help='Dimension of input features')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension in model')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer/LSTM layers')
+    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    
+    # Transformer-specific arguments
+    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads (transformer only)')
+    
+    # LSTM-specific arguments
+    parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional LSTM (LSTM only)')
+    
+    # Training arguments
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
+    parser.add_argument('--num_epochs', type=int, default=100, help='Maximum number of epochs')
+    parser.add_argument('--patience', type=int, default=10, help='Patience for early stopping')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    
+    # Other arguments
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--output_dir', type=str, default=None, 
+                       help='Output directory for results (defaults to ./outputs/model_type)')
+    parser.add_argument('--cpu', action='store_true', help='Use CPU even if GPU is available')
+    
+    args = parser.parse_args()
+    
+    # Set default output directory if not specified
+    if args.output_dir is None:
+        args.output_dir = f'./outputs/{args.model_type}'
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create cache directory if specified and doesn't exist
+    if args.cache_dir:
+        os.makedirs(args.cache_dir, exist_ok=True)
+    
+    # Run main function
+    main(args)
