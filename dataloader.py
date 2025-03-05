@@ -605,3 +605,209 @@ def collate_fn(batch):
         dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
         dummy_labels = torch.zeros(1, dtype=torch.long)
         return dummy_features, dummy_labels
+    
+
+# New function to add to dataloader.py
+def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
+    """
+    Load pre-split data from train_set.pkl, val_set.pkl, and test_set.pkl.
+    
+    Args:
+        data_dir (str): Directory containing .pkl files
+        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
+        cache_dir (str, optional): Directory to cache processed data
+        
+    Returns:
+        tuple: (splits, metrics, max_patches, class_weights)
+    """
+    train_file = os.path.join(data_dir, 'train_set.pkl')
+    val_file = os.path.join(data_dir, 'val_set.pkl')
+    test_file = os.path.join(data_dir, 'test_set.pkl')
+    
+    # Check if all files exist
+    if not (os.path.exists(train_file) and os.path.exists(val_file) and os.path.exists(test_file)):
+        raise FileNotFoundError(f"Pre-split files not found in {data_dir}. Need train_set.pkl, val_set.pkl, and test_set.pkl.")
+    
+    print("WARNING: Using pre-split data files. Cross-validation is not allowed in this mode.")
+    print(f"Loading pre-split data from {data_dir}...")
+    
+    # Process each file
+    train_max_patches, train_data = process_pkl_file(train_file, endpoint)
+    val_max_patches, val_data = process_pkl_file(val_file, endpoint)
+    test_max_patches, test_data = process_pkl_file(test_file, endpoint)
+    
+    # Calculate maximum patches across all datasets
+    max_patches = max(train_max_patches, val_max_patches, test_max_patches)
+    
+    # Calculate class weights based on training data
+    train_labels = [instance['label'] for instance in train_data]
+    class_counts = Counter(train_labels)
+    total_samples = len(train_labels)
+    num_classes = len(class_counts)
+    class_weights = torch.tensor(
+        [total_samples / (num_classes * count) for label, count in sorted(class_counts.items())],
+        dtype=torch.float32
+    )
+    
+    # Calculate counts
+    train_count = {'total': len(train_data), 0: class_counts[0], 1: class_counts[1]}
+    
+    val_labels = [instance['label'] for instance in val_data]
+    val_class_counts = Counter(val_labels)
+    val_count = {'total': len(val_data), 0: val_class_counts[0], 1: val_class_counts[1]}
+    
+    test_labels = [instance['label'] for instance in test_data]
+    test_class_counts = Counter(test_labels)
+    test_count = {'total': len(test_data), 0: test_class_counts[0], 1: test_class_counts[1]}
+    
+    # Prepare metrics
+    metrics = {
+        'train_count': train_count['total'],
+        'val_count': val_count['total'],
+        'test_count': test_count['total'],
+        'train_label_counts': {0: train_count[0], 1: train_count[1]},
+        'val_label_counts': {0: val_count[0], 1: val_count[1]},
+        'test_label_counts': {0: test_count[0], 1: test_count[1]}
+    }
+    
+    # Print split statistics
+    print(f"Using pre-split data:")
+    print(f"  Train: {metrics['train_count']} samples, {metrics['train_label_counts']}")
+    print(f"  Validation: {metrics['val_count']} samples, {metrics['val_label_counts']}")
+    print(f"  Test: {metrics['test_count']} samples, {metrics['test_label_counts']}")
+    print(f"  Max patches: {max_patches}")
+    
+    # Create the final splits dictionary
+    splits = {
+        'train_data': train_data,
+        'val_data': val_data,
+        'test_data': test_data
+    }
+    
+    return splits, metrics, max_patches, class_weights
+
+# Modified prepare_dataloaders function
+def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
+                        val_size=0.15, test_size=0.15, num_workers=4, seed=42,
+                        use_cache=True, cache_dir=None, splitted=False):
+    """
+    Prepare DataLoaders for training, validation, and testing with improved caching.
+    
+    Args:
+        data_dir (str): Directory containing .pkl files
+        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
+        batch_size (int): Batch size
+        oversample_factor (float): Factor for oversampling minority class (0 to disable)
+        val_size (float): Proportion of data for validation
+        test_size (float): Proportion of data for testing
+        num_workers (int): Number of workers for data loading
+        seed (int): Random seed
+        use_cache (bool): Whether to cache data in memory
+        cache_dir (str, optional): Directory to cache processed data
+        splitted (bool): Whether to use pre-split data files
+    
+    Returns:
+        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics, max_patches)
+    """
+    # Create cache directory if specified and doesn't exist
+    if cache_dir and not os.path.exists(cache_dir):
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    # Handle pre-split data case
+    if splitted:
+        splits, metrics, max_patches, class_weights = load_presplit_data(
+            data_dir=data_dir,
+            endpoint=endpoint,
+            cache_dir=cache_dir
+        )
+    else:
+        # Compute directory checksum to detect changes
+        dir_checksum = compute_data_dir_checksum(data_dir)
+        
+        # Cached split filename
+        cached_split_file = os.path.join(cache_dir, f"splits_{endpoint}_{val_size}_{test_size}_{seed}_{dir_checksum}.pkl") if cache_dir else None
+        
+        # Check if cached splits exist
+        if cached_split_file and os.path.exists(cached_split_file) and use_cache:
+            print(f"Loading cached splits from {cached_split_file}")
+            with open(cached_split_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                splits = cached_data['splits']
+                max_patches = cached_data['max_patches']
+                class_weights = cached_data['class_weights']
+                metrics = cached_data['metrics']
+        else:
+            # Process data and create splits
+            print(f"Processing data and creating splits (no cached splits found or cache not used)")
+            splits, metrics, max_patches, class_weights = create_cached_splits(
+                data_dir=data_dir,
+                endpoint=endpoint,
+                val_size=val_size,
+                test_size=test_size,
+                seed=seed,
+                cache_dir=cache_dir
+            )
+            
+            # Cache the splits
+            if cached_split_file:
+                with open(cached_split_file, 'wb') as f:
+                    pickle.dump({
+                        'splits': splits,
+                        'max_patches': max_patches,
+                        'class_weights': class_weights,
+                        'metrics': metrics
+                    }, f)
+    
+    # Create datasets using the splits
+    train_dataset = CachedDataset(splits['train_data'], max_patches=max_patches)
+    val_dataset = CachedDataset(splits['val_data'], max_patches=max_patches)
+    test_dataset = CachedDataset(splits['test_data'], max_patches=max_patches)
+    
+    # Create weighted sampler for handling class imbalance if oversampling is enabled
+    train_sampler = None
+    if oversample_factor > 0:
+        train_sampler = create_weighted_sampler(
+            labels=[item['label'] for item in splits['train_data']],
+            oversample_factor=oversample_factor
+        )
+        shuffle = False  # Don't shuffle when using sampler
+    else:
+        shuffle = True  # Shuffle when not using sampler
+    
+    # Create data loaders with our collate_fn
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        shuffle=shuffle if train_sampler is None else False,  # Only shuffle if not using sampler
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return (
+        train_loader, 
+        val_loader, 
+        test_loader, 
+        class_weights, 
+        metrics, 
+        max_patches
+    )

@@ -28,6 +28,10 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print(f"Using device: {device}")
     
+    # Check for incompatible options
+    if args.cv_folds > 1 and args.splitted:
+        raise ValueError("Cross-validation is not allowed when using pre-split data files. Please set --cv_folds to 1.")
+    
     if args.cv_folds > 1:
         # Cross-validation mode
         print(f"Using {args.cv_folds}-fold cross-validation")
@@ -67,7 +71,8 @@ def main(args):
             num_workers=args.num_workers,
             seed=args.seed,
             use_cache=args.use_cache,
-            cache_dir=args.cache_dir
+            cache_dir=args.cache_dir,
+            splitted=args.splitted  # Pass the new splitted argument
         )
         print(f"Data loaders ready")
         
@@ -204,6 +209,8 @@ if __name__ == "__main__":
                         help='Factor for oversampling minority class (0 to disable)')
     parser.add_argument('--val_size', type=float, default=0.15, help='Validation set size')
     parser.add_argument('--test_size', type=float, default=0.15, help='Test set size')
+    parser.add_argument('--splitted', action='store_true', 
+                        help='Use pre-splitted train/val/test pkl files (train_set.pkl, val_set.pkl, test_set.pkl)')
     
     # Cross-validation arguments
     parser.add_argument('--cv_folds', type=int, default=1, 
