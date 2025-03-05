@@ -123,6 +123,8 @@ def load_model(model_class, model_path, model_config=None, device=None):
     return model
 
 
+# Here are the fixed versions of the visualization functions that properly save files
+
 def plot_training_curves(history, output_dir=None, neptune_run=None):
     """
     Plot training and validation curves.
@@ -132,6 +134,9 @@ def plot_training_curves(history, output_dir=None, neptune_run=None):
         output_dir (str, optional): Directory to save plots
         neptune_run: Neptune run object for logging (optional)
     """
+    import matplotlib.pyplot as plt
+    import os
+    
     # Determine number of plots needed - we need a third plot if F1 metrics are available
     has_f1_metrics = 'val_f1_macro' in history
     num_plots = 3 if has_f1_metrics else 2
@@ -172,105 +177,64 @@ def plot_training_curves(history, output_dir=None, neptune_run=None):
     plt.tight_layout()
     fig = plt.gcf()
     
+    # Save figure locally if output_dir is provided
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'training_curves.png'))
+        output_file = os.path.join(output_dir, 'training_curves.png')
+        fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Training curves saved to {output_file}")
     
     # Log figure to Neptune
     if neptune_run:
         try:
-            # Try to use the neptune_utils function if available
             from neptune_utils import log_figure
             log_figure(neptune_run, fig, "training_curves")
-        except ImportError:
-            # Fallback to direct logging if neptune_utils is not available
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/training_curves"].upload(buffer)
+        except Exception as e:
+            print(f"Warning: Failed to log figure to Neptune: {e}")
     
-    plt.show()
+    plt.close(fig)  # Close the figure to avoid displaying when not needed
 
 
-def plot_comparison_metrics(metrics, output_dir=None, neptune_run=None):
+def plot_confusion_matrix(y_true, y_pred, output_dir=None, neptune_run=None):
     """
-    Plot comparison of key metrics across train, validation, and test sets.
+    Plot confusion matrix.
     
     Args:
-        metrics (dict): Metrics dictionary with 'all_datasets' key
-        output_dir (str, optional): Directory to save plots
+        y_true (array): True labels
+        y_pred (array): Predicted labels
+        output_dir (str, optional): Directory to save plot
         neptune_run: Neptune run object for logging (optional)
     """
-    if 'all_datasets' not in metrics:
-        print("No comprehensive metrics available for comparison.")
-        return
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import os
+    from sklearn.metrics import confusion_matrix
     
-    # Extract datasets and metrics
-    datasets = []
-    accuracy = []
-    f1_macro = []
-    f1_weighted = []
-    auc_scores = []
+    cm = confusion_matrix(y_true, y_pred)
     
-    for dataset_name in ['train', 'val', 'test']:
-        if dataset_name in metrics['all_datasets']:
-            datasets.append(dataset_name.capitalize())
-            ds_metrics = metrics['all_datasets'][dataset_name]
-            accuracy.append(ds_metrics['accuracy'] * 100)  # Convert to percentage
-            f1_macro.append(ds_metrics['f1_macro'])
-            f1_weighted.append(ds_metrics['f1_weighted'])
-            auc_scores.append(ds_metrics['auc'])
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    fig = plt.gcf()
     
-    if not datasets:
-        print("No dataset metrics available for comparison.")
-        return
-    
-    # Create plot with 4 subplots
-    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    fig.suptitle('Comparison of Metrics Across Datasets', fontsize=16)
-    
-    # Accuracy plot
-    axs[0, 0].bar(datasets, accuracy, color='skyblue')
-    axs[0, 0].set_title('Accuracy (%)')
-    axs[0, 0].set_ylim(0, 100)
-    axs[0, 0].grid(axis='y', alpha=0.3)
-    
-    # F1 Macro plot
-    axs[0, 1].bar(datasets, f1_macro, color='lightgreen')
-    axs[0, 1].set_title('F1 Macro')
-    axs[0, 1].set_ylim(0, 1)
-    axs[0, 1].grid(axis='y', alpha=0.3)
-    
-    # F1 Weighted plot
-    axs[1, 0].bar(datasets, f1_weighted, color='salmon')
-    axs[1, 0].set_title('F1 Weighted')
-    axs[1, 0].set_ylim(0, 1)
-    axs[1, 0].grid(axis='y', alpha=0.3)
-    
-    # AUC plot
-    axs[1, 1].bar(datasets, auc_scores, color='plum')
-    axs[1, 1].set_title('AUC')
-    axs[1, 1].set_ylim(0, 1)
-    axs[1, 1].grid(axis='y', alpha=0.3)
-    
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
+    # Save figure locally if output_dir is provided
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'dataset_comparison.png'))
+        output_file = os.path.join(output_dir, 'confusion_matrix.png')
+        fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Confusion matrix saved to {output_file}")
     
     # Log figure to Neptune
     if neptune_run:
         try:
             from neptune_utils import log_figure
-            log_figure(neptune_run, fig, "dataset_comparison")
-        except ImportError:
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/dataset_comparison"].upload(buffer)
+            log_figure(neptune_run, fig, "confusion_matrix")
+        except Exception as e:
+            print(f"Warning: Failed to log figure to Neptune: {e}")
     
-    plt.show()
+    plt.close(fig)  # Close the figure to avoid displaying when not needed
 
 
 def plot_roc_curve(labels, probs, output_dir=None, neptune_run=None):
@@ -283,6 +247,10 @@ def plot_roc_curve(labels, probs, output_dir=None, neptune_run=None):
         output_dir (str, optional): Directory to save plot
         neptune_run: Neptune run object for logging (optional)
     """
+    import matplotlib.pyplot as plt
+    import os
+    from sklearn.metrics import roc_curve, auc
+    
     fpr, tpr, _ = roc_curve(labels, probs)
     roc_auc = auc(fpr, tpr)
     
@@ -298,23 +266,22 @@ def plot_roc_curve(labels, probs, output_dir=None, neptune_run=None):
     plt.grid(True)
     fig = plt.gcf()
     
+    # Save figure locally if output_dir is provided
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
+        output_file = os.path.join(output_dir, 'roc_curve.png')
+        fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"ROC curve saved to {output_file}")
     
     # Log figure to Neptune
     if neptune_run:
         try:
             from neptune_utils import log_figure
             log_figure(neptune_run, fig, "roc_curve")
-        except ImportError:
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/roc_curve"].upload(buffer)
+        except Exception as e:
+            print(f"Warning: Failed to log figure to Neptune: {e}")
     
-    plt.show()
-
+    plt.close(fig)  # Close the figure to avoid displaying when not needed
 
 def plot_pr_curve(labels, probs, output_dir=None, neptune_run=None):
     """

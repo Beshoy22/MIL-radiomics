@@ -278,22 +278,19 @@ def plot_metrics_with_ci(metrics, output_dir=None, neptune_run=None):
     plt.tight_layout()
     fig = plt.gcf()
     
+    # Save figure locally if output_dir is provided
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'metrics_with_ci.png'))
+        output_file = os.path.join(output_dir, 'metrics_with_ci.png')
+        fig.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Metrics with CI plot saved to {output_file}")
     
     # Log figure to Neptune
     if neptune_run:
         try:
             from neptune_utils import log_figure
             log_figure(neptune_run, fig, "metrics_with_confidence_intervals")
-        except ImportError:
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/metrics_with_confidence_intervals"].upload(buffer)
+        except Exception as e:
+            print(f"Warning: Failed to log figure to Neptune: {e}")
     
-    if not output_dir:  # Only show if not saving to file
-        plt.show()
-    else:
-        plt.close()
+    plt.close(fig)  # Close the figure to avoid displaying when not needed

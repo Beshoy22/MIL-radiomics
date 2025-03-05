@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 import torch
 import numpy as np
+import json
 
 def load_neptune_config():
     """
@@ -76,13 +77,20 @@ def log_figure(run, fig, name):
     if run is None:
         return
     
-    # Save figure to BytesIO
-    buffer = BytesIO()
-    fig.savefig(buffer, format='png')
-    buffer.seek(0)
-    
-    # Log figure to Neptune
-    run[f"visualizations/{name}"].upload(buffer)
+    try:
+        # Save figure to a temporary file
+        temp_filename = f"temp_{name}.png"
+        fig.savefig(temp_filename, format='png')
+        
+        # Upload the temporary file to Neptune
+        run[f"visualizations/{name}"].upload(temp_filename)
+        
+        # Clean up the temporary file
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+            
+    except Exception as e:
+        print(f"Warning: Failed to log figure to Neptune: {e}")
 
 def log_model(run, model, name="model"):
     """
@@ -96,15 +104,18 @@ def log_model(run, model, name="model"):
     if run is None:
         return
     
-    # Save model to file
-    model_path = f"{name}.pt"
-    torch.save(model.state_dict(), model_path)
-    
-    # Log model to Neptune
-    run[f"models/{name}"].upload(model_path)
-    
-    # Remove temporary file
-    os.remove(model_path)
+    try:
+        # Save model to file
+        model_path = f"{name}.pt"
+        torch.save(model.state_dict(), model_path)
+        
+        # Log model to Neptune
+        run[f"models/{name}"].upload(model_path)
+        
+        # Remove temporary file
+        os.remove(model_path)
+    except Exception as e:
+        print(f"Warning: Failed to log model to Neptune: {e}")
 
 def log_confusion_matrix(run, cm, name="confusion_matrix"):
     """
@@ -118,9 +129,26 @@ def log_confusion_matrix(run, cm, name="confusion_matrix"):
     if run is None:
         return
     
-    # Convert to list if numpy array
-    if isinstance(cm, np.ndarray):
-        cm = cm.tolist()
-        
-    # Log confusion matrix
-    run[f"evaluation/{name}"] = cm
+    try:
+        # Convert confusion matrix to a format Neptune accepts
+        if isinstance(cm, np.ndarray):
+            # Convert to list of lists instead of numpy array
+            cm_list = cm.tolist()
+            # Convert to JSON string
+            cm_json = json.dumps(cm_list)
+            # Log as string
+            run[f"evaluation/{name}_json"] = cm_json
+            
+            # Also log individual cells for simpler metrics
+            if cm.shape == (2, 2):  # For binary classification
+                run[f"evaluation/{name}_TP"] = int(cm[1, 1])
+                run[f"evaluation/{name}_FP"] = int(cm[0, 1])
+                run[f"evaluation/{name}_FN"] = int(cm[1, 0])
+                run[f"evaluation/{name}_TN"] = int(cm[0, 0])
+        else:
+            # If already a list, convert to JSON string
+            cm_json = json.dumps(cm)
+            run[f"evaluation/{name}_json"] = cm_json
+            
+    except Exception as e:
+        print(f"Warning: Failed to log confusion matrix to Neptune: {e}")
