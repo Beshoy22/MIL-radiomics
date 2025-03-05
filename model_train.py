@@ -14,7 +14,7 @@ from sklearn.metrics import (
 def train_model(model, train_loader, val_loader, criterion, optimizer, 
                 scheduler=None, num_epochs=100, early_stopping_patience=10,
                 device='cuda' if torch.cuda.is_available() else 'cpu',
-                selection_metric='f1_macro'):
+                selection_metric='f1_macro', neptune_run=None):
     """
     Train the model.
     
@@ -31,6 +31,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         selection_metric (str): Metric to use for model selection and early stopping:
                                'f1_macro' - Uses F1 macro score (higher is better)
                                'val_loss' - Uses validation loss (lower is better)
+        neptune_run: Neptune run object for logging (optional)
         
     Returns:
         model: Trained model
@@ -155,6 +156,26 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         epoch_time = time.time() - epoch_start_time
         total_time = time.time() - start_time
         
+        # Log to Neptune
+        if neptune_run:
+            # Log training metrics
+            neptune_run["train/loss"].log(train_loss, step=epoch)
+            neptune_run["train/accuracy"].log(train_acc, step=epoch)
+            
+            # Log validation metrics
+            neptune_run["val/loss"].log(val_loss, step=epoch)
+            neptune_run["val/accuracy"].log(val_acc, step=epoch)
+            neptune_run["val/f1_macro"].log(val_f1_macro, step=epoch)
+            neptune_run["val/f1_weighted"].log(val_f1_weighted, step=epoch)
+            
+            # Log learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            neptune_run["train/learning_rate"].log(current_lr, step=epoch)
+            
+            # Log time metrics
+            neptune_run["time/epoch_duration"].log(epoch_time, step=epoch)
+            neptune_run["time/total_duration"].log(total_time, step=epoch)
+        
         # Print progress with F1 scores
         print(f'Epoch {epoch+1}/{num_epochs} | '
               f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | '
@@ -171,12 +192,24 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 best_model_state = copy.deepcopy(model.state_dict())
                 improved = True
                 print(f"New best model (F1 Macro: {best_f1_macro:.4f})")
+                
+                # Log best model metrics to Neptune
+                if neptune_run:
+                    neptune_run["best_model/epoch"] = epoch + 1
+                    neptune_run["best_model/f1_macro"] = best_f1_macro
+                    neptune_run["best_model/val_loss"] = val_loss
         elif selection_metric == 'val_loss':
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model_state = copy.deepcopy(model.state_dict())
                 improved = True
                 print(f"New best model (Val Loss: {best_val_loss:.4f})")
+                
+                # Log best model metrics to Neptune
+                if neptune_run:
+                    neptune_run["best_model/epoch"] = epoch + 1
+                    neptune_run["best_model/val_loss"] = best_val_loss
+                    neptune_run["best_model/f1_macro"] = val_f1_macro
         else:
             raise ValueError(f"Unsupported selection metric: {selection_metric}. Choose 'f1_macro' or 'val_loss'.")
         
@@ -188,6 +221,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             
         # Early stopping
         if patience_counter >= early_stopping_patience:
+            if neptune_run:
+                neptune_run["training/early_stopping"] = True
+                neptune_run["training/stopped_epoch"] = epoch + 1
+            
             print(f'Early stopping at epoch {epoch+1}')
             break
     
@@ -198,12 +235,18 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     total_time = time.time() - start_time
     print(f'Training completed in {total_time/60:.2f} minutes')
     
+    # Log final training summary to Neptune
+    if neptune_run:
+        neptune_run["training/total_epochs"] = epoch + 1
+        neptune_run["training/total_time_minutes"] = total_time / 60
+    
     return model, history
 
 
 def evaluate_model(model, test_loader, criterion=None, 
                   train_loader=None, val_loader=None,
-                  device='cuda' if torch.cuda.is_available() else 'cpu'):
+                  device='cuda' if torch.cuda.is_available() else 'cpu',
+                  neptune_run=None):
     """
     Evaluate the model on test data, and optionally on training and validation data.
     
@@ -214,6 +257,7 @@ def evaluate_model(model, test_loader, criterion=None,
         train_loader (DataLoader, optional): Training data loader for reporting train metrics
         val_loader (DataLoader, optional): Validation data loader for reporting validation metrics
         device (str): Device to use for evaluation
+        neptune_run: Neptune run object for logging (optional)
         
     Returns:
         dict: Evaluation metrics
@@ -321,6 +365,18 @@ def evaluate_model(model, test_loader, criterion=None,
             print(f"  F1 Weighted: {metrics[key]['f1_weighted']:.4f}")
             print(f"  AUC: {metrics[key]['auc']:.4f}")
             print(f"  Confusion Matrix:\n{metrics[key]['confusion_matrix']}")
+            
+            # Log metrics to Neptune
+            if neptune_run:
+                for metric_name in ['accuracy', 'precision', 'recall', 'f1', 'f1_macro', 'f1_weighted', 'auc']:
+                    neptune_run[f"evaluation/{key}/{metric_name}"] = metrics[key][metric_name]
+                
+                if metrics[key]['loss'] is not None:
+                    neptune_run[f"evaluation/{key}/loss"] = metrics[key]['loss']
+                
+                # Log confusion matrix
+                from neptune_utils import log_confusion_matrix
+                log_confusion_matrix(neptune_run, metrics[key]['confusion_matrix'], name=f"{key}_confusion_matrix")
     
     # For backward compatibility, return test metrics at the top level
     result = {

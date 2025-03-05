@@ -109,7 +109,7 @@ def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confiden
     return metric_value, [float(bootstrap_values[lower_idx]), float(bootstrap_values[upper_idx])]
 
 
-def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, confidence=0.95):
+def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, confidence=0.95, neptune_run=None):
     """
     Evaluate model with confidence intervals for all metrics.
     
@@ -119,6 +119,7 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         device (str): Device to use
         n_bootstrap (int): Number of bootstrap samples
         confidence (float): Confidence level (0-1)
+        neptune_run: Neptune run object for logging (optional)
         
     Returns:
         dict: Evaluation metrics with confidence intervals
@@ -180,6 +181,29 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
     print(f"AUC: {auc:.4f} (95% CI: {auc_ci[0]:.4f}-{auc_ci[1]:.4f})")
     print(f"Confusion Matrix:\n{cm}")
     
+    # Log metrics with confidence intervals to Neptune
+    if neptune_run:
+        # Create dictionary with metric values and confidence intervals
+        metrics_ci = {
+            'accuracy': {'value': accuracy, 'ci_low': accuracy_ci[0], 'ci_high': accuracy_ci[1]},
+            'precision': {'value': precision, 'ci_low': precision_ci[0], 'ci_high': precision_ci[1]},
+            'recall': {'value': recall, 'ci_low': recall_ci[0], 'ci_high': recall_ci[1]},
+            'f1': {'value': f1, 'ci_low': f1_ci[0], 'ci_high': f1_ci[1]},
+            'f1_macro': {'value': f1_macro, 'ci_low': f1_macro_ci[0], 'ci_high': f1_macro_ci[1]},
+            'f1_weighted': {'value': f1_weighted, 'ci_low': f1_weighted_ci[0], 'ci_high': f1_weighted_ci[1]},
+            'auc': {'value': auc, 'ci_low': auc_ci[0], 'ci_high': auc_ci[1]}
+        }
+        
+        # Log each metric with its confidence intervals
+        for metric_name, metric_values in metrics_ci.items():
+            neptune_run[f"evaluation/test/{metric_name}/value"] = metric_values['value']
+            neptune_run[f"evaluation/test/{metric_name}/ci_low"] = metric_values['ci_low']
+            neptune_run[f"evaluation/test/{metric_name}/ci_high"] = metric_values['ci_high']
+            
+        # Log confusion matrix
+        from neptune_utils import log_confusion_matrix
+        log_confusion_matrix(neptune_run, cm, name="test_confusion_matrix_with_ci")
+    
     # Return dictionary with all metrics
     return {
         'accuracy': accuracy,
@@ -203,13 +227,14 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
     }
 
 
-def plot_metrics_with_ci(metrics, output_dir=None):
+def plot_metrics_with_ci(metrics, output_dir=None, neptune_run=None):
     """
     Plot metrics with confidence intervals.
     
     Args:
         metrics (dict): Metrics dictionary with confidence intervals
         output_dir (str, optional): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
     """
     import matplotlib.pyplot as plt
     import os
@@ -246,10 +271,18 @@ def plot_metrics_with_ci(metrics, output_dir=None):
         plt.text(i, v + 0.02, f"{v:.3f}", ha='center')
     
     plt.tight_layout()
+    fig = plt.gcf()
     
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'metrics_with_ci.png'))
+    
+    # Log figure to Neptune
+    if neptune_run:
+        from neptune_utils import log_figure
+        log_figure(neptune_run, fig, "metrics_with_confidence_intervals")
+    
+    if output_dir:
         plt.close()
     else:
         plt.show()

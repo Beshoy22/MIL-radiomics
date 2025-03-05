@@ -12,6 +12,7 @@ from utils import set_seed, save_model_and_results, plot_training_curves, plot_c
 from cross_validation import create_cached_folds, create_fold_loaders
 from cross_val_training import run_cross_validation
 from metrics_with_ci import evaluate_model_with_ci, plot_metrics_with_ci
+from neptune_utils import init_neptune_run, log_model
 
 
 def main(args):
@@ -21,6 +22,13 @@ def main(args):
     Args:
         args: Command line arguments
     """
+    # Initialize Neptune logging if enabled
+    neptune_run = None
+    if args.use_neptune:
+        neptune_run = init_neptune_run(args)
+        if neptune_run:
+            print("Neptune logging initialized")
+    
     # Set seed for reproducibility
     set_seed(args.seed)
     
@@ -51,8 +59,16 @@ def main(args):
             folds=folds,
             max_patches=max_patches,
             class_weights=class_weights,
-            device=device
+            device=device,
+            neptune_run=neptune_run
         )
+        
+        # Log final model to Neptune
+        if neptune_run:
+            log_model(neptune_run, best_model, name="final_model")
+        
+        if neptune_run:
+            neptune_run.stop()
         
         return best_model, fold_metrics, fold_histories
         
@@ -75,6 +91,13 @@ def main(args):
             splitted=args.splitted  # Pass the new splitted argument
         )
         print(f"Data loaders ready")
+        
+        # Log dataset sizes to Neptune
+        if neptune_run:
+            neptune_run["data/train_samples"] = len(train_loader.dataset)
+            neptune_run["data/val_samples"] = len(val_loader.dataset)
+            neptune_run["data/test_samples"] = len(test_loader.dataset)
+            neptune_run["data/max_patches"] = max_patches
         
         # Create model based on model type
         if args.model_type == 'transformer':
@@ -132,6 +155,10 @@ def main(args):
         num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model has {num_params:,} trainable parameters")
         
+        # Log model params to Neptune
+        if neptune_run:
+            neptune_run["model/trainable_parameters"] = num_params
+        
         # Set up training components
         criterion, optimizer, scheduler = setup_training(
             model=model,
@@ -153,7 +180,8 @@ def main(args):
             num_epochs=args.num_epochs,
             early_stopping_patience=args.patience,
             device=device,
-            selection_metric=args.selection_metric
+            selection_metric=args.selection_metric,
+            neptune_run=neptune_run
         )
         
         # Evaluate model with confidence intervals
@@ -162,7 +190,8 @@ def main(args):
             model=model,
             dataloader=test_loader,
             device=device,
-            n_bootstrap=args.bootstrap_samples
+            n_bootstrap=args.bootstrap_samples,
+            neptune_run=neptune_run
         )
         
         # Also get standard metrics on all datasets for comparison
@@ -172,7 +201,8 @@ def main(args):
             train_loader=train_loader,
             val_loader=val_loader,
             criterion=criterion,
-            device=device
+            device=device,
+            neptune_run=neptune_run
         )
         
         # Save model and results
@@ -184,11 +214,16 @@ def main(args):
         )
         
         # Plot results
-        plot_training_curves(history, args.output_dir)
-        plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir)
-        plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir)
-        plot_comparison_metrics(standard_metrics, args.output_dir)
-        plot_metrics_with_ci(metrics, args.output_dir)
+        plot_training_curves(history, args.output_dir, neptune_run)
+        plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], args.output_dir, neptune_run)
+        plot_roc_curve(metrics['all_labels'], metrics['all_probs'], args.output_dir, neptune_run)
+        plot_comparison_metrics(standard_metrics, args.output_dir, neptune_run)
+        plot_metrics_with_ci(metrics, args.output_dir, neptune_run)
+        
+        # Log final model to Neptune
+        if neptune_run:
+            log_model(neptune_run, model, name="final_model")
+            neptune_run.stop()
         
         return model, metrics, history
 
@@ -252,6 +287,9 @@ if __name__ == "__main__":
     parser.add_argument('--selection_metric', type=str, default='f1_macro', 
                         choices=['f1_macro', 'val_loss'], 
                         help='Metric to use for model selection during training')
+    
+    # Neptune logging argument
+    parser.add_argument('--use_neptune', action='store_true', help='Enable Neptune logging')
     
     # Other arguments
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
