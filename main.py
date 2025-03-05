@@ -136,8 +136,8 @@ def main(args):
             device=device
         )
         
-        # Train model
-        print(f"Training {args.model_type} model...")
+        # Train model with specified selection metric
+        print(f"Training {args.model_type} model (using {args.selection_metric} for model selection)...")
         model, history = train_model(
             model=model,
             train_loader=train_loader,
@@ -147,7 +147,8 @@ def main(args):
             scheduler=scheduler,
             num_epochs=args.num_epochs,
             early_stopping_patience=args.patience,
-            device=device
+            device=device,
+            selection_metric=args.selection_metric
         )
         
         # Evaluate model with confidence intervals
@@ -241,6 +242,9 @@ if __name__ == "__main__":
     parser.add_argument('--num_epochs', type=int, default=100, help='Maximum number of epochs')
     parser.add_argument('--patience', type=int, default=10, help='Patience for early stopping')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--selection_metric', type=str, default='f1_macro', 
+                        choices=['f1_macro', 'val_loss'], 
+                        help='Metric to use for model selection during training')
     
     # Other arguments
     parser.add_argument('--seed', type=int, default=42, help='Random seed')

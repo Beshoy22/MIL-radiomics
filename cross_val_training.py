@@ -33,7 +33,7 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
     fold_models = []
     
     # For keeping track of best model
-    best_f1 = -1
+    best_f1_macro = -1  # Changed from f1_weighted to f1_macro
     best_model = None
     best_model_fold = -1
     
@@ -110,8 +110,8 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
             device=device
         )
         
-        # Train model
-        print(f"Training {args.model_type} model for fold {fold_idx+1}...")
+        # Train model with specified selection metric
+        print(f"Training {args.model_type} model for fold {fold_idx+1} (using {args.selection_metric} for model selection)...")
         model, history = train_model(
             model=model,
             train_loader=train_loader,
@@ -121,7 +121,8 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
             scheduler=scheduler,
             num_epochs=args.num_epochs,
             early_stopping_patience=args.patience,
-            device=device
+            device=device,
+            selection_metric=args.selection_metric
         )
         
         # Evaluate model on validation fold
@@ -156,12 +157,13 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
         plot_roc_curve(metrics['all_labels'], metrics['all_probs'], fold_output_dir)
         
         # Check if this is the best model so far
-        if metrics['f1_weighted'] > best_f1:
-            best_f1 = metrics['f1_weighted']
+        # Changed from f1_weighted to f1_macro
+        if metrics['f1_macro'] > best_f1_macro:
+            best_f1_macro = metrics['f1_macro']
             best_model = model
             best_model_fold = fold_idx
     
-    print(f"\nCross-validation complete. Best model from fold {best_model_fold+1} with F1-weighted: {best_f1:.4f}")
+    print(f"\nCross-validation complete. Best model from fold {best_model_fold+1} with F1-macro: {best_f1_macro:.4f}")
     
     # Save the best model separately
     torch.save(best_model.state_dict(), os.path.join(args.output_dir, 'best_model.pt'))

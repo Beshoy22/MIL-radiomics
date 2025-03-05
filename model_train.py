@@ -13,7 +13,8 @@ from sklearn.metrics import (
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, 
                 scheduler=None, num_epochs=100, early_stopping_patience=10,
-                device='cuda' if torch.cuda.is_available() else 'cpu'):
+                device='cuda' if torch.cuda.is_available() else 'cpu',
+                selection_metric='f1_macro'):
     """
     Train the model.
     
@@ -27,6 +28,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         num_epochs (int): Maximum number of epochs
         early_stopping_patience (int): Patience for early stopping
         device (str): Device to use for training
+        selection_metric (str): Metric to use for model selection and early stopping:
+                               'f1_macro' - Uses F1 macro score (higher is better)
+                               'val_loss' - Uses validation loss (lower is better)
         
     Returns:
         model: Trained model
@@ -34,6 +38,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     """
     model = model.to(device)
     best_val_loss = float('inf')
+    best_f1_macro = -1.0  # Track best F1 macro
     best_model_state = None
     patience_counter = 0
     
@@ -134,7 +139,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         # Update learning rate
         if scheduler is not None:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(val_loss)
+                scheduler.step(val_loss)  # Still use val_loss for scheduler
             else:
                 scheduler.step()
         
@@ -157,10 +162,26 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
               f'F1 Macro: {val_f1_macro:.4f} | F1 Weighted: {val_f1_weighted:.4f} | '
               f'Time: {epoch_time:.1f}s | Total: {total_time/60:.1f}m')
         
-        # Check for improvement
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = copy.deepcopy(model.state_dict())
+        # Check for improvement based on selected metric
+        improved = False
+        
+        if selection_metric == 'f1_macro':
+            if val_f1_macro > best_f1_macro:
+                best_f1_macro = val_f1_macro
+                best_model_state = copy.deepcopy(model.state_dict())
+                improved = True
+                print(f"New best model (F1 Macro: {best_f1_macro:.4f})")
+        elif selection_metric == 'val_loss':
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_state = copy.deepcopy(model.state_dict())
+                improved = True
+                print(f"New best model (Val Loss: {best_val_loss:.4f})")
+        else:
+            raise ValueError(f"Unsupported selection metric: {selection_metric}. Choose 'f1_macro' or 'val_loss'.")
+        
+        # Reset or increment patience counter
+        if improved:
             patience_counter = 0
         else:
             patience_counter += 1
