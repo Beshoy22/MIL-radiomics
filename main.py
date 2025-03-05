@@ -13,6 +13,7 @@ from cross_validation import create_cached_folds, create_fold_loaders
 from cross_val_training import run_cross_validation
 from metrics_with_ci import evaluate_model_with_ci, plot_metrics_with_ci
 from neptune_utils import init_neptune_run, log_model
+from center_evaluation import evaluate_by_center, plot_center_metrics
 
 
 def main(args):
@@ -205,12 +206,32 @@ def main(args):
             neptune_run=neptune_run
         )
         
+        # NEW: Center-based evaluation
+        print(f"Evaluating {args.model_type} model by center...")
+        center_metrics = evaluate_by_center(
+            model=model,
+            test_loader=test_loader,
+            device=device,
+            neptune_run=neptune_run
+        )
+        
+        # NEW: Plot center-based metrics
+        print(f"Plotting center-based metrics...")
+        plot_center_metrics(
+            center_metrics=center_metrics,
+            key_metrics=['f1_macro', 'auc'],
+            output_dir=args.output_dir,
+            neptune_run=neptune_run,
+            min_samples=args.min_center_samples  # Only include centers with at least this many samples
+        )
+        
         # Save model and results
         save_model_and_results(
             model=model,
             metrics=metrics,  # Use metrics with confidence intervals
             history=history,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            center_metrics=center_metrics  # Save center metrics as well
         )
         
         # Plot results
@@ -225,7 +246,7 @@ def main(args):
             log_model(neptune_run, model, name="final_model")
             neptune_run.stop()
         
-        return model, metrics, history
+        return model, metrics, history, center_metrics
 
 
 if __name__ == "__main__":
@@ -287,6 +308,10 @@ if __name__ == "__main__":
     parser.add_argument('--selection_metric', type=str, default='f1_macro', 
                         choices=['f1_macro', 'val_loss'], 
                         help='Metric to use for model selection during training')
+    
+    # Center evaluation arguments
+    parser.add_argument('--min_center_samples', type=int, default=10,
+                        help='Minimum number of samples for a center to be included in visualization')
     
     # Neptune logging argument
     parser.add_argument('--use_neptune', action='store_true', help='Enable Neptune logging')

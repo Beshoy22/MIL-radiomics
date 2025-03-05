@@ -27,15 +27,16 @@ def set_seed(seed=42):
     print(f"Random seed set to {seed}")
 
 
-def save_model_and_results(model, metrics, history, output_dir):
+def save_model_and_results(model, metrics, history, output_dir, center_metrics=None):
     """
-    Save model, metrics, and training history.
+    Save model, metrics, training history, and center metrics.
     
     Args:
         model (nn.Module): Trained model
         metrics (dict): Evaluation metrics
         history (dict): Training history
         output_dir (str): Directory to save results
+        center_metrics (dict, optional): Center-based evaluation metrics
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -92,6 +93,51 @@ def save_model_and_results(model, metrics, history, output_dir):
     
     with open(os.path.join(output_dir, 'history.json'), 'w') as f:
         json.dump(history_json, f, indent=2)
+    
+    # Save center metrics if provided
+    if center_metrics:
+        # Process center metrics for JSON saving
+        center_metrics_json = {}
+        
+        # Extract weighted metrics
+        if 'weighted_metrics' in center_metrics:
+            center_metrics_json['weighted_metrics'] = {}
+            for k, v in center_metrics['weighted_metrics'].items():
+                if isinstance(v, np.ndarray):
+                    center_metrics_json['weighted_metrics'][k] = v.tolist()
+                elif isinstance(v, np.float64) or isinstance(v, np.float32):
+                    center_metrics_json['weighted_metrics'][k] = float(v)
+                else:
+                    center_metrics_json['weighted_metrics'][k] = v
+        
+        # Extract individual center metrics
+        if 'center_metrics' in center_metrics:
+            center_metrics_json['center_metrics'] = {}
+            for center, center_data in center_metrics['center_metrics'].items():
+                center_metrics_json['center_metrics'][center] = {}
+                for k, v in center_data.items():
+                    if k in ['confusion_matrix', 'center_labels', 'center_preds', 'center_probs']:
+                        if isinstance(v, np.ndarray):
+                            continue  # Skip large arrays
+                        elif isinstance(v, list) and len(v) > 100:
+                            continue  # Skip large lists
+                    
+                    if isinstance(v, np.ndarray):
+                        center_metrics_json['center_metrics'][center][k] = v.tolist()
+                    elif isinstance(v, np.float64) or isinstance(v, np.float32):
+                        center_metrics_json['center_metrics'][center][k] = float(v)
+                    else:
+                        try:
+                            # Try to serialize the value to check if it's JSON serializable
+                            json.dumps(v)
+                            center_metrics_json['center_metrics'][center][k] = v
+                        except (TypeError, OverflowError):
+                            # Skip values that can't be serialized to JSON
+                            continue
+        
+        # Save center metrics to a separate file
+        with open(os.path.join(output_dir, 'center_metrics.json'), 'w') as f:
+            json.dump(center_metrics_json, f, indent=2)
     
     print(f"Model and results saved to {output_dir}")
 
