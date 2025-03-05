@@ -369,10 +369,11 @@ def evaluate_model(model, test_loader, criterion=None,
             # Log metrics to Neptune
             if neptune_run:
                 for metric_name in ['accuracy', 'precision', 'recall', 'f1', 'f1_macro', 'f1_weighted', 'auc']:
-                    neptune_run[f"evaluation/{key}/{metric_name}"] = metrics[key][metric_name]
+                    # Use a flattened structure instead of nested namespaces
+                    neptune_run[f"evaluation/{key}_{metric_name}"] = metrics[key][metric_name]
                 
                 if metrics[key]['loss'] is not None:
-                    neptune_run[f"evaluation/{key}/loss"] = metrics[key]['loss']
+                    neptune_run[f"evaluation/{key}_loss"] = metrics[key]['loss']
                 
                 # Log confusion matrix
                 from neptune_utils import log_confusion_matrix
