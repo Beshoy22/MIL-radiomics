@@ -123,7 +123,205 @@ def load_model(model_class, model_path, model_config=None, device=None):
     return model
 
 
-# Here are the fixed versions of the visualization functions that properly save files
+def plot_comparison_metrics(metrics, output_dir=None, neptune_run=None):
+    """
+    Plot comparison of key metrics across train, validation, and test sets.
+    
+    Args:
+        metrics (dict): Metrics dictionary with 'all_datasets' key
+        output_dir (str, optional): Directory to save plots
+        neptune_run: Neptune run object for logging (optional)
+    """
+    if 'all_datasets' not in metrics:
+        print("No comprehensive metrics available for comparison.")
+        return
+    
+    # Extract datasets and metrics
+    datasets = []
+    accuracy = []
+    f1_macro = []
+    f1_weighted = []
+    auc_scores = []
+    
+    for dataset_name in ['train', 'val', 'test']:
+        if dataset_name in metrics['all_datasets']:
+            datasets.append(dataset_name.capitalize())
+            ds_metrics = metrics['all_datasets'][dataset_name]
+            accuracy.append(ds_metrics['accuracy'] * 100)  # Convert to percentage
+            f1_macro.append(ds_metrics['f1_macro'])
+            f1_weighted.append(ds_metrics['f1_weighted'])
+            auc_scores.append(ds_metrics['auc'])
+    
+    if not datasets:
+        print("No dataset metrics available for comparison.")
+        return
+    
+    # Create plot with 4 subplots
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle('Comparison of Metrics Across Datasets', fontsize=16)
+    
+    # Accuracy plot
+    axs[0, 0].bar(datasets, accuracy, color='skyblue')
+    axs[0, 0].set_title('Accuracy (%)')
+    axs[0, 0].set_ylim(0, 100)
+    axs[0, 0].grid(axis='y', alpha=0.3)
+    
+    # F1 Macro plot
+    axs[0, 1].bar(datasets, f1_macro, color='lightgreen')
+    axs[0, 1].set_title('F1 Macro')
+    axs[0, 1].set_ylim(0, 1)
+    axs[0, 1].grid(axis='y', alpha=0.3)
+    
+    # F1 Weighted plot
+    axs[1, 0].bar(datasets, f1_weighted, color='salmon')
+    axs[1, 0].set_title('F1 Weighted')
+    axs[1, 0].set_ylim(0, 1)
+    axs[1, 0].grid(axis='y', alpha=0.3)
+    
+    # AUC plot
+    axs[1, 1].bar(datasets, auc_scores, color='plum')
+    axs[1, 1].set_title('AUC')
+    axs[1, 1].set_ylim(0, 1)
+    axs[1, 1].grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(os.path.join(output_dir, 'dataset_comparison.png'))
+    
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "dataset_comparison")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/dataset_comparison"].upload(buffer)
+    
+    plt.show()
+
+
+def plot_pr_curve(labels, probs, output_dir=None, neptune_run=None):
+    """
+    Plot Precision-Recall curve.
+    
+    Args:
+        labels (array): True labels
+        probs (array): Predicted probabilities
+        output_dir (str, optional): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
+    """
+    precision, recall, _ = precision_recall_curve(labels, probs)
+    avg_precision = np.mean(precision)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(recall, precision, color='blue', lw=2, label=f'PR curve (avg precision = {avg_precision:.2f})')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curve')
+    plt.legend(loc='lower left')
+    plt.grid(True)
+    fig = plt.gcf()
+    
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(os.path.join(output_dir, 'pr_curve.png'))
+    
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "pr_curve")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/pr_curve"].upload(buffer)
+    
+    plt.show()
+
+
+def visualize_attention(model, dataloader, num_samples=5, output_dir=None, 
+                        device='cuda' if torch.cuda.is_available() else 'cpu',
+                        neptune_run=None):
+    """
+    Visualize attention weights for a few samples.
+    
+    Args:
+        model (nn.Module): Trained model
+        dataloader (DataLoader): DataLoader with data
+        num_samples (int): Number of samples to visualize
+        output_dir (str, optional): Directory to save the plots
+        device (str): Device to use for inference
+        neptune_run: Neptune run object for logging (optional)
+    """
+    model.eval()
+    
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    samples_visualized = 0
+    
+    with torch.no_grad():
+        for features, labels in dataloader:
+            if samples_visualized >= num_samples:
+                break
+                
+            features, labels = features.to(device), labels.to(device)
+            
+            # Forward pass with attention weights
+            _, attn_weights = model(features, return_attn=True)
+            
+            # Convert to numpy for visualization
+            features_np = features.cpu().numpy()
+            labels_np = labels.cpu().numpy()
+            attn_weights_np = attn_weights.cpu().numpy()
+            
+            # Visualize each sample in the batch
+            for i in range(min(features.size(0), num_samples - samples_visualized)):
+                # Get number of actual patches (non-zero)
+                n_patches = features_np[i].shape[0]
+                non_zero_patches = np.sum(np.any(features_np[i] != 0, axis=1))
+                
+                # Get attention weights for this sample
+                sample_attn = attn_weights_np[i, 0, :non_zero_patches]
+                
+                # Normalize attention weights for visualization
+                normalized_attn = (sample_attn - sample_attn.min()) / (sample_attn.max() - sample_attn.min() + 1e-8)
+                
+                # Plot attention weights
+                plt.figure(figsize=(10, 4))
+                plt.bar(range(non_zero_patches), normalized_attn)
+                plt.title(f'Sample {samples_visualized+1}, Label: {labels_np[i]}')
+                plt.xlabel('Patch index')
+                plt.ylabel('Normalized attention weight')
+                plt.tight_layout()
+                fig = plt.gcf()
+                
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, f'attention_sample_{samples_visualized+1}.png'))
+                
+                # Log figure to Neptune
+                if neptune_run:
+                    try:
+                        from neptune_utils import log_figure
+                        log_figure(neptune_run, fig, f"attention_sample_{samples_visualized+1}")
+                    except ImportError:
+                        buffer = BytesIO()
+                        fig.savefig(buffer, format='png')
+                        buffer.seek(0)
+                        neptune_run[f"visualizations/attention_sample_{samples_visualized+1}"].upload(buffer)
+                
+                plt.show()
+                samples_visualized += 1
+                
+                if samples_visualized >= num_samples:
+                    break
 
 def plot_training_curves(history, output_dir=None, neptune_run=None):
     """
@@ -282,160 +480,3 @@ def plot_roc_curve(labels, probs, output_dir=None, neptune_run=None):
             print(f"Warning: Failed to log figure to Neptune: {e}")
     
     plt.close(fig)  # Close the figure to avoid displaying when not needed
-
-def plot_pr_curve(labels, probs, output_dir=None, neptune_run=None):
-    """
-    Plot Precision-Recall curve.
-    
-    Args:
-        labels (array): True labels
-        probs (array): Predicted probabilities
-        output_dir (str, optional): Directory to save plot
-        neptune_run: Neptune run object for logging (optional)
-    """
-    precision, recall, _ = precision_recall_curve(labels, probs)
-    avg_precision = np.mean(precision)
-    
-    plt.figure(figsize=(8, 6))
-    plt.plot(recall, precision, color='blue', lw=2, label=f'PR curve (avg precision = {avg_precision:.2f})')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve')
-    plt.legend(loc='lower left')
-    plt.grid(True)
-    fig = plt.gcf()
-    
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'pr_curve.png'))
-    
-    # Log figure to Neptune
-    if neptune_run:
-        try:
-            from neptune_utils import log_figure
-            log_figure(neptune_run, fig, "pr_curve")
-        except ImportError:
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/pr_curve"].upload(buffer)
-    
-    plt.show()
-
-
-def plot_confusion_matrix(y_true, y_pred, output_dir=None, neptune_run=None):
-    """
-    Plot confusion matrix.
-    
-    Args:
-        y_true (array): True labels
-        y_pred (array): Predicted labels
-        output_dir (str, optional): Directory to save plot
-        neptune_run: Neptune run object for logging (optional)
-    """
-    from sklearn.metrics import confusion_matrix
-    
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title('Confusion Matrix')
-    fig = plt.gcf()
-    
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
-    
-    # Log figure to Neptune
-    if neptune_run:
-        try:
-            from neptune_utils import log_figure
-            log_figure(neptune_run, fig, "confusion_matrix")
-        except ImportError:
-            buffer = BytesIO()
-            fig.savefig(buffer, format='png')
-            buffer.seek(0)
-            neptune_run["visualizations/confusion_matrix"].upload(buffer)
-    
-    plt.show()
-
-
-def visualize_attention(model, dataloader, num_samples=5, output_dir=None, 
-                        device='cuda' if torch.cuda.is_available() else 'cpu',
-                        neptune_run=None):
-    """
-    Visualize attention weights for a few samples.
-    
-    Args:
-        model (nn.Module): Trained model
-        dataloader (DataLoader): DataLoader with data
-        num_samples (int): Number of samples to visualize
-        output_dir (str, optional): Directory to save the plots
-        device (str): Device to use for inference
-        neptune_run: Neptune run object for logging (optional)
-    """
-    model.eval()
-    
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    samples_visualized = 0
-    
-    with torch.no_grad():
-        for features, labels in dataloader:
-            if samples_visualized >= num_samples:
-                break
-                
-            features, labels = features.to(device), labels.to(device)
-            
-            # Forward pass with attention weights
-            _, attn_weights = model(features, return_attn=True)
-            
-            # Convert to numpy for visualization
-            features_np = features.cpu().numpy()
-            labels_np = labels.cpu().numpy()
-            attn_weights_np = attn_weights.cpu().numpy()
-            
-            # Visualize each sample in the batch
-            for i in range(min(features.size(0), num_samples - samples_visualized)):
-                # Get number of actual patches (non-zero)
-                n_patches = features_np[i].shape[0]
-                non_zero_patches = np.sum(np.any(features_np[i] != 0, axis=1))
-                
-                # Get attention weights for this sample
-                sample_attn = attn_weights_np[i, 0, :non_zero_patches]
-                
-                # Normalize attention weights for visualization
-                normalized_attn = (sample_attn - sample_attn.min()) / (sample_attn.max() - sample_attn.min() + 1e-8)
-                
-                # Plot attention weights
-                plt.figure(figsize=(10, 4))
-                plt.bar(range(non_zero_patches), normalized_attn)
-                plt.title(f'Sample {samples_visualized+1}, Label: {labels_np[i]}')
-                plt.xlabel('Patch index')
-                plt.ylabel('Normalized attention weight')
-                plt.tight_layout()
-                fig = plt.gcf()
-                
-                if output_dir:
-                    plt.savefig(os.path.join(output_dir, f'attention_sample_{samples_visualized+1}.png'))
-                
-                # Log figure to Neptune
-                if neptune_run:
-                    try:
-                        from neptune_utils import log_figure
-                        log_figure(neptune_run, fig, f"attention_sample_{samples_visualized+1}")
-                    except ImportError:
-                        buffer = BytesIO()
-                        fig.savefig(buffer, format='png')
-                        buffer.seek(0)
-                        neptune_run[f"visualizations/attention_sample_{samples_visualized+1}"].upload(buffer)
-                
-                plt.show()
-                samples_visualized += 1
-                
-                if samples_visualized >= num_samples:
-                    break
