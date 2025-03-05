@@ -376,8 +376,12 @@ def evaluate_model(model, test_loader, criterion=None,
                     neptune_run[f"evaluation/{key}_loss"] = metrics[key]['loss']
                 
                 # Log confusion matrix
-                from neptune_utils import log_confusion_matrix
-                log_confusion_matrix(neptune_run, metrics[key]['confusion_matrix'], name=f"{key}_confusion_matrix")
+                try:
+                    from neptune_utils import log_confusion_matrix
+                    log_confusion_matrix(neptune_run, metrics[key]['confusion_matrix'], name=f"{key}_confusion_matrix")
+                except (ImportError, AttributeError):
+                    # Fallback to direct logging of confusion matrix
+                    neptune_run[f"evaluation/{key}_confusion_matrix"] = metrics[key]['confusion_matrix'].tolist()
     
     # For backward compatibility, return test metrics at the top level
     result = {

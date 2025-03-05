@@ -5,6 +5,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, 
     f1_score, roc_auc_score, confusion_matrix
 )
+from io import BytesIO
 
 
 def predict(model, dataloader, return_attention=False, 
@@ -194,15 +195,19 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
             'auc': {'value': auc, 'ci_low': auc_ci[0], 'ci_high': auc_ci[1]}
         }
         
-        # Log each metric with its confidence intervals
+        # Log each metric with its confidence intervals using flattened structure
         for metric_name, metric_values in metrics_ci.items():
-            neptune_run[f"evaluation/test/{metric_name}/value"] = metric_values['value']
-            neptune_run[f"evaluation/test/{metric_name}/ci_low"] = metric_values['ci_low']
-            neptune_run[f"evaluation/test/{metric_name}/ci_high"] = metric_values['ci_high']
+            neptune_run[f"evaluation/test_{metric_name}_value"] = metric_values['value']
+            neptune_run[f"evaluation/test_{metric_name}_ci_low"] = metric_values['ci_low']
+            neptune_run[f"evaluation/test_{metric_name}_ci_high"] = metric_values['ci_high']
             
         # Log confusion matrix
-        from neptune_utils import log_confusion_matrix
-        log_confusion_matrix(neptune_run, cm, name="test_confusion_matrix_with_ci")
+        try:
+            from neptune_utils import log_confusion_matrix
+            log_confusion_matrix(neptune_run, cm, name="test_confusion_matrix_with_ci")
+        except (ImportError, AttributeError):
+            # Fallback to logging confusion matrix as an array
+            neptune_run["evaluation/test_confusion_matrix"] = cm.tolist()
     
     # Return dictionary with all metrics
     return {
@@ -279,10 +284,16 @@ def plot_metrics_with_ci(metrics, output_dir=None, neptune_run=None):
     
     # Log figure to Neptune
     if neptune_run:
-        from neptune_utils import log_figure
-        log_figure(neptune_run, fig, "metrics_with_confidence_intervals")
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "metrics_with_confidence_intervals")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/metrics_with_confidence_intervals"].upload(buffer)
     
-    if output_dir:
-        plt.close()
-    else:
+    if not output_dir:  # Only show if not saving to file
         plt.show()
+    else:
+        plt.close()

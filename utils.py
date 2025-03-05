@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
 from sklearn.manifold import TSNE
+from io import BytesIO
 
 def set_seed(seed=42):
     """
@@ -122,13 +123,14 @@ def load_model(model_class, model_path, model_config=None, device=None):
     return model
 
 
-def plot_training_curves(history, output_dir=None):
+def plot_training_curves(history, output_dir=None, neptune_run=None):
     """
     Plot training and validation curves.
     
     Args:
         history (dict): Training history
         output_dir (str, optional): Directory to save plots
+        neptune_run: Neptune run object for logging (optional)
     """
     # Determine number of plots needed - we need a third plot if F1 metrics are available
     has_f1_metrics = 'val_f1_macro' in history
@@ -168,21 +170,36 @@ def plot_training_curves(history, output_dir=None):
         plt.grid(True)
     
     plt.tight_layout()
+    fig = plt.gcf()
     
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'training_curves.png'))
     
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            # Try to use the neptune_utils function if available
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "training_curves")
+        except ImportError:
+            # Fallback to direct logging if neptune_utils is not available
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/training_curves"].upload(buffer)
+    
     plt.show()
 
 
-def plot_comparison_metrics(metrics, output_dir=None):
+def plot_comparison_metrics(metrics, output_dir=None, neptune_run=None):
     """
     Plot comparison of key metrics across train, validation, and test sets.
     
     Args:
         metrics (dict): Metrics dictionary with 'all_datasets' key
         output_dir (str, optional): Directory to save plots
+        neptune_run: Neptune run object for logging (optional)
     """
     if 'all_datasets' not in metrics:
         print("No comprehensive metrics available for comparison.")
@@ -242,10 +259,21 @@ def plot_comparison_metrics(metrics, output_dir=None):
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'dataset_comparison.png'))
     
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "dataset_comparison")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/dataset_comparison"].upload(buffer)
+    
     plt.show()
 
 
-def plot_roc_curve(labels, probs, output_dir=None):
+def plot_roc_curve(labels, probs, output_dir=None, neptune_run=None):
     """
     Plot ROC curve.
     
@@ -253,6 +281,7 @@ def plot_roc_curve(labels, probs, output_dir=None):
         labels (array): True labels
         probs (array): Predicted probabilities
         output_dir (str, optional): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
     """
     fpr, tpr, _ = roc_curve(labels, probs)
     roc_auc = auc(fpr, tpr)
@@ -267,15 +296,27 @@ def plot_roc_curve(labels, probs, output_dir=None):
     plt.title('Receiver Operating Characteristic (ROC) Curve')
     plt.legend(loc='lower right')
     plt.grid(True)
+    fig = plt.gcf()
     
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
     
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "roc_curve")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/roc_curve"].upload(buffer)
+    
     plt.show()
 
 
-def plot_pr_curve(labels, probs, output_dir=None):
+def plot_pr_curve(labels, probs, output_dir=None, neptune_run=None):
     """
     Plot Precision-Recall curve.
     
@@ -283,6 +324,7 @@ def plot_pr_curve(labels, probs, output_dir=None):
         labels (array): True labels
         probs (array): Predicted probabilities
         output_dir (str, optional): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
     """
     precision, recall, _ = precision_recall_curve(labels, probs)
     avg_precision = np.mean(precision)
@@ -296,15 +338,27 @@ def plot_pr_curve(labels, probs, output_dir=None):
     plt.title('Precision-Recall Curve')
     plt.legend(loc='lower left')
     plt.grid(True)
+    fig = plt.gcf()
     
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'pr_curve.png'))
     
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "pr_curve")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/pr_curve"].upload(buffer)
+    
     plt.show()
 
 
-def plot_confusion_matrix(y_true, y_pred, output_dir=None):
+def plot_confusion_matrix(y_true, y_pred, output_dir=None, neptune_run=None):
     """
     Plot confusion matrix.
     
@@ -312,6 +366,7 @@ def plot_confusion_matrix(y_true, y_pred, output_dir=None):
         y_true (array): True labels
         y_pred (array): Predicted labels
         output_dir (str, optional): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
     """
     from sklearn.metrics import confusion_matrix
     
@@ -321,16 +376,29 @@ def plot_confusion_matrix(y_true, y_pred, output_dir=None):
     plt.xlabel('Predicted')
     plt.ylabel('True')
     plt.title('Confusion Matrix')
+    fig = plt.gcf()
     
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
     
+    # Log figure to Neptune
+    if neptune_run:
+        try:
+            from neptune_utils import log_figure
+            log_figure(neptune_run, fig, "confusion_matrix")
+        except ImportError:
+            buffer = BytesIO()
+            fig.savefig(buffer, format='png')
+            buffer.seek(0)
+            neptune_run["visualizations/confusion_matrix"].upload(buffer)
+    
     plt.show()
 
 
 def visualize_attention(model, dataloader, num_samples=5, output_dir=None, 
-                        device='cuda' if torch.cuda.is_available() else 'cpu'):
+                        device='cuda' if torch.cuda.is_available() else 'cpu',
+                        neptune_run=None):
     """
     Visualize attention weights for a few samples.
     
@@ -340,6 +408,7 @@ def visualize_attention(model, dataloader, num_samples=5, output_dir=None,
         num_samples (int): Number of samples to visualize
         output_dir (str, optional): Directory to save the plots
         device (str): Device to use for inference
+        neptune_run: Neptune run object for logging (optional)
     """
     model.eval()
     
@@ -382,9 +451,21 @@ def visualize_attention(model, dataloader, num_samples=5, output_dir=None,
                 plt.xlabel('Patch index')
                 plt.ylabel('Normalized attention weight')
                 plt.tight_layout()
+                fig = plt.gcf()
                 
                 if output_dir:
                     plt.savefig(os.path.join(output_dir, f'attention_sample_{samples_visualized+1}.png'))
+                
+                # Log figure to Neptune
+                if neptune_run:
+                    try:
+                        from neptune_utils import log_figure
+                        log_figure(neptune_run, fig, f"attention_sample_{samples_visualized+1}")
+                    except ImportError:
+                        buffer = BytesIO()
+                        fig.savefig(buffer, format='png')
+                        buffer.seek(0)
+                        neptune_run[f"visualizations/attention_sample_{samples_visualized+1}"].upload(buffer)
                 
                 plt.show()
                 samples_visualized += 1
