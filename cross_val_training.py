@@ -11,9 +11,10 @@ from conv_mil_model import create_conv_model
 from lightweight_conv_mil_model import create_lightweight_conv_model
 from model_train import setup_training, train_model
 from utils import save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
+from neptune_utils import log_figure, log_model
 
 
-def run_cross_validation(args, folds, max_patches, class_weights, device='cuda'):
+def run_cross_validation(args, folds, max_patches, class_weights, device='cuda', neptune_run=None):
     """
     Run k-fold cross-validation training and evaluation.
     
@@ -23,6 +24,7 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
         max_patches (int): Maximum number of patches
         class_weights (torch.Tensor): Class weights for loss function
         device (str): Device to use for training
+        neptune_run: Neptune run object for logging (optional)
         
     Returns:
         tuple: (best_model, fold_metrics, fold_histories)
@@ -41,6 +43,11 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
     for fold_idx in range(n_folds):
         print(f"\n{'='*20} FOLD {fold_idx+1}/{n_folds} {'='*20}")
         
+        # Log fold info to Neptune
+        if neptune_run:
+            neptune_run["cv/current_fold"] = fold_idx + 1
+            neptune_run["cv/total_folds"] = n_folds
+        
         # Create dataloaders for this fold
         from cross_validation import create_fold_loaders
         train_loader, val_loader = create_fold_loaders(
@@ -54,6 +61,11 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
         
         print(f"Fold {fold_idx+1} - Training samples: {len(train_loader.dataset)}, "
               f"Validation samples: {len(val_loader.dataset)}")
+        
+        # Log dataset sizes to Neptune
+        if neptune_run:
+            neptune_run[f"cv/fold_{fold_idx+1}/train_samples"] = len(train_loader.dataset)
+            neptune_run[f"cv/fold_{fold_idx+1}/val_samples"] = len(val_loader.dataset)
         
         # Create model based on model type
         if args.model_type == 'transformer':
@@ -110,8 +122,14 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
             device=device
         )
         
-        # Train model with specified selection metric
+        # Train model with specified selection metric and Neptune logging
         print(f"Training {args.model_type} model for fold {fold_idx+1} (using {args.selection_metric} for model selection)...")
+        
+        # Create a namespace for this fold in Neptune
+        fold_neptune_run = None
+        if neptune_run:
+            fold_neptune_run = neptune_run
+        
         model, history = train_model(
             model=model,
             train_loader=train_loader,
@@ -122,7 +140,8 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
             num_epochs=args.num_epochs,
             early_stopping_patience=args.patience,
             device=device,
-            selection_metric=args.selection_metric
+            selection_metric=args.selection_metric,
+            neptune_run=fold_neptune_run
         )
         
         # Evaluate model on validation fold
@@ -132,7 +151,8 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
         metrics = evaluate_model_with_ci(
             model=model,
             dataloader=val_loader,
-            device=device
+            device=device,
+            neptune_run=fold_neptune_run
         )
         
         # Store results
@@ -151,17 +171,22 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
             output_dir=fold_output_dir
         )
         
-        # Plot fold-specific results
-        plot_training_curves(history, fold_output_dir)
-        plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], fold_output_dir)
-        plot_roc_curve(metrics['all_labels'], metrics['all_probs'], fold_output_dir)
+        # Plot fold-specific results (Neptune logging is done inside these functions)
+        plot_training_curves(history, fold_output_dir, fold_neptune_run)
+        plot_confusion_matrix(metrics['all_labels'], metrics['all_preds'], fold_output_dir, fold_neptune_run)
+        plot_roc_curve(metrics['all_labels'], metrics['all_probs'], fold_output_dir, fold_neptune_run)
         
         # Check if this is the best model so far
-        # Changed from f1_weighted to f1_macro
         if metrics['f1_macro'] > best_f1_macro:
             best_f1_macro = metrics['f1_macro']
             best_model = model
             best_model_fold = fold_idx
+            
+            # Log best model info to Neptune
+            if neptune_run:
+                neptune_run["cv/best_model/fold"] = best_model_fold + 1
+                neptune_run["cv/best_model/f1_macro"] = best_f1_macro
+                log_model(neptune_run, model, name=f"best_model_fold_{best_model_fold+1}")
     
     print(f"\nCross-validation complete. Best model from fold {best_model_fold+1} with F1-macro: {best_f1_macro:.4f}")
     
@@ -169,18 +194,19 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda')
     torch.save(best_model.state_dict(), os.path.join(args.output_dir, 'best_model.pt'))
     
     # Aggregate and save fold metrics
-    aggregate_and_save_cv_metrics(fold_metrics, args.output_dir)
+    aggregate_and_save_cv_metrics(fold_metrics, args.output_dir, neptune_run)
     
     return best_model, fold_metrics, fold_histories
 
 
-def aggregate_and_save_cv_metrics(fold_metrics, output_dir):
+def aggregate_and_save_cv_metrics(fold_metrics, output_dir, neptune_run=None):
     """
     Aggregate metrics across folds and save results.
     
     Args:
         fold_metrics (list): List of metrics for each fold
         output_dir (str): Directory to save results
+        neptune_run: Neptune run object for logging (optional)
     """
     # Keys to aggregate
     metric_keys = ['accuracy', 'precision', 'recall', 'f1', 'f1_macro', 'f1_weighted', 'auc']
@@ -203,7 +229,7 @@ def aggregate_and_save_cv_metrics(fold_metrics, output_dir):
         json.dump(aggregated, f, indent=2)
     
     # Create visualization of cross-validation results
-    plot_cv_metrics(aggregated, output_dir)
+    plot_cv_metrics(aggregated, output_dir, neptune_run)
     
     # Print summary
     print("\nCross-Validation Summary:")
@@ -211,15 +237,21 @@ def aggregate_and_save_cv_metrics(fold_metrics, output_dir):
         mean = aggregated[key]['mean']
         std = aggregated[key]['std']
         print(f"  {key.capitalize()}: {mean:.4f} ± {std:.4f}")
+        
+        # Log mean and std to Neptune
+        if neptune_run:
+            neptune_run[f"cv/metrics/{key}/mean"] = mean
+            neptune_run[f"cv/metrics/{key}/std"] = std
 
 
-def plot_cv_metrics(aggregated, output_dir):
+def plot_cv_metrics(aggregated, output_dir, neptune_run=None):
     """
     Plot cross-validation metrics with error bars.
     
     Args:
         aggregated (dict): Aggregated metrics
         output_dir (str): Directory to save plot
+        neptune_run: Neptune run object for logging (optional)
     """
     metric_keys = ['accuracy', 'precision', 'recall', 'f1', 'f1_macro', 'f1_weighted', 'auc']
     
@@ -250,7 +282,13 @@ def plot_cv_metrics(aggregated, output_dir):
         plt.text(i, mean + 0.02, f"{mean:.3f}", ha='center')
     
     plt.tight_layout()
+    fig = plt.gcf()
     
     # Save figure
     plt.savefig(os.path.join(output_dir, 'cv_metrics.png'))
+    
+    # Log figure to Neptune
+    if neptune_run:
+        log_figure(neptune_run, fig, "cv_metrics")
+    
     plt.close()
