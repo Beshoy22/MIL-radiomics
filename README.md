@@ -32,7 +32,7 @@ This framework provides a comprehensive solution for training and evaluating Mul
 
 1. Clone this repository:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/Beshoy22/MIL-radiomics.git
    cd mil-framework
    ```
 
