@@ -215,6 +215,6 @@ Neptune.ai is used for experiment tracking and visualization. When enabled with 
 
 Access the Neptune dashboard to view and compare experiments.
 
-## Contributing
+# Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
