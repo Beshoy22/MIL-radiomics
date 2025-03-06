@@ -9,6 +9,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import os
 import json
+import pandas as pd
 from io import BytesIO
 
 def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_available() else 'cpu', 
@@ -33,10 +34,34 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
     all_labels = []
     all_preds = []
     all_probs = []
+    all_patient_ids = []
     
     # Use tqdm for progress tracking
     with torch.no_grad():
-        for batch_idx, (features, labels) in enumerate(tqdm(test_loader, desc="Evaluating by center")):
+        for batch in tqdm(test_loader, desc="Evaluating by center"):
+            # Handle different batch formats (with or without identifiers)
+            if len(batch) == 3:  # New format with identifiers
+                features, labels, identifiers = batch
+                batch_centers = identifiers.get('center', ['unknown'] * len(labels))
+                batch_patient_ids = identifiers.get('patient_id', [f"unknown_{i}" for i in range(len(labels))])
+            else:  # Old format without identifiers
+                features, labels = batch
+                # Attempt to get center from dataset for backward compatibility
+                batch_centers = []
+                batch_patient_ids = []
+                for i in range(len(labels)):
+                    # Get the index in the dataset
+                    dataset_idx = len(all_labels) + i
+                    if dataset_idx < len(test_loader.dataset):
+                        # Get the center from the instance
+                        center = test_loader.dataset.data[dataset_idx].get('center', 'unknown')
+                        patient_id = test_loader.dataset.data[dataset_idx].get('patient_id', f"unknown_{dataset_idx}")
+                        batch_centers.append(center)
+                        batch_patient_ids.append(patient_id)
+                    else:
+                        batch_centers.append('unknown')
+                        batch_patient_ids.append(f"unknown_{dataset_idx}")
+                
             features, labels = features.to(device), labels.to(device)
             
             # Forward pass
@@ -50,20 +75,8 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
             all_labels.extend(labels.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
             all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
-            
-            # Get centers from dataset
-            batch_centers = []
-            for i in range(len(labels)):
-                # Get the index in the dataset
-                dataset_idx = batch_idx * test_loader.batch_size + i
-                if dataset_idx < len(test_loader.dataset):
-                    # Get the center from the instance
-                    center = test_loader.dataset.data[dataset_idx].get('center', 'unknown')
-                    batch_centers.append(center)
-                else:
-                    batch_centers.append('unknown')
-            
             centers.extend(batch_centers)
+            all_patient_ids.extend(batch_patient_ids)
     
     # Convert to numpy arrays
     all_labels = np.array(all_labels)
@@ -82,6 +95,7 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
         center_labels = all_labels[center_mask]
         center_preds = all_preds[center_mask]
         center_probs = all_probs[center_mask]
+        center_patient_ids = [all_patient_ids[i] for i in range(len(all_patient_ids)) if centers[i] == center]
         
         # Calculate metrics
         try:
@@ -118,10 +132,24 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
                 'positive_ratio': pos_ratio,
                 'center_labels': center_labels,
                 'center_preds': center_preds,
-                'center_probs': center_probs
+                'center_probs': center_probs,
+                'center_patient_ids': center_patient_ids
             }
             
             center_metrics[center] = metrics
+            
+            # Save center-specific predictions to CSV if output directory is provided
+            if hasattr(test_loader.dataset, 'output_dir') and test_loader.dataset.output_dir:
+                output_dir = os.path.join(test_loader.dataset.output_dir, 'center_predictions')
+                os.makedirs(output_dir, exist_ok=True)
+                df = pd.DataFrame({
+                    'patient_id': center_patient_ids,
+                    'ground_truth': center_labels,
+                    'prediction': center_preds,
+                    'probability': center_probs,
+                    'center': [center] * len(center_labels)
+                })
+                df.to_csv(os.path.join(output_dir, f'predictions_{center}.csv'), index=False)
             
             # Print center metrics
             print(f"\nCenter: {center}")
@@ -160,6 +188,11 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
         if neptune_run:
             neptune_run[f"evaluation_by_center/{metric_name}"] = value
     
+    # Save all predictions to a single CSV file
+    if hasattr(test_loader.dataset, 'output_dir') and test_loader.dataset.output_dir:
+        output_dir = test_loader.dataset.output_dir
+        save_predictions_to_csv(all_patient_ids, all_labels, all_preds, all_probs, centers, output_dir)
+    
     # Return overall results
     result = {
         'center_metrics': center_metrics,
@@ -167,10 +200,40 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
         'all_labels': all_labels,
         'all_preds': all_preds,
         'all_probs': all_probs,
-        'centers': centers
+        'centers': centers,
+        'patient_ids': all_patient_ids
     }
     
     return result
+
+
+def save_predictions_to_csv(patient_ids, labels, predictions, probabilities, centers, output_dir):
+    """
+    Save predictions to a CSV file.
+    
+    Args:
+        patient_ids (list): List of patient IDs
+        labels (array): True labels
+        predictions (array): Predicted labels
+        probabilities (array): Predicted probabilities for the positive class
+        centers (list): List of centers
+        output_dir (str): Directory to save the CSV file
+    """
+    # Create DataFrame
+    df = pd.DataFrame({
+        'patient_id': patient_ids,
+        'ground_truth': labels,
+        'prediction': predictions,
+        'probability': probabilities,
+        'center': centers
+    })
+    
+    # Save to CSV
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, 'all_predictions.csv')
+    df.to_csv(output_file, index=False)
+    print(f"All predictions saved to {output_file}")
+
 
 def plot_center_metrics(center_metrics, key_metrics=['f1_macro', 'auc'], 
                         output_dir=None, neptune_run=None, min_samples=10):

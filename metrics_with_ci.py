@@ -20,8 +20,8 @@ def predict(model, dataloader, return_attention=False,
         device (str): Device to use for inference
         
     Returns:
-        tuple: (labels, predictions, probabilities, attention_weights) if return_attention=True
-               (labels, predictions, probabilities) otherwise
+        tuple: (labels, predictions, probabilities, patient_ids, centers, attention_weights) if return_attention=True
+               (labels, predictions, probabilities, patient_ids, centers) otherwise
     """
     model = model.to(device)
     model.eval()
@@ -29,9 +29,21 @@ def predict(model, dataloader, return_attention=False,
     all_preds = []
     all_probs = []
     all_attns = []
+    all_patient_ids = []
+    all_centers = []
     
     with torch.no_grad():
-        for features, labels in tqdm(dataloader, desc="Predicting"):
+        for batch in tqdm(dataloader, desc="Predicting"):
+            # Handle different return formats from the dataloader
+            if len(batch) == 3:  # New format with identifiers
+                features, labels, identifiers = batch
+                patient_ids = identifiers.get('patient_id', [f"unknown_{i}" for i in range(len(labels))])
+                centers = identifiers.get('center', ['unknown'] * len(labels))
+            else:  # Old format without identifiers
+                features, labels = batch
+                patient_ids = [f"unknown_{i}" for i in range(len(labels))]
+                centers = ['unknown'] * len(labels)
+                
             features, labels = features.to(device), labels.to(device)
             
             # Forward pass with or without attention weights
@@ -48,11 +60,13 @@ def predict(model, dataloader, return_attention=False,
             all_labels.extend(labels.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
             all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
+            all_patient_ids.extend(patient_ids)
+            all_centers.extend(centers)
     
     if return_attention:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_attns
+        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers, all_attns
     else:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs)
+        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers
 
 
 def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confidence=0.95):
@@ -126,7 +140,7 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         dict: Evaluation metrics with confidence intervals
     """
     # Get predictions
-    labels, preds, probs = predict(model, dataloader, device=device)
+    labels, preds, probs, patient_ids, centers = predict(model, dataloader, device=device)
     
     # Calculate confusion matrix
     cm = confusion_matrix(labels, preds)
@@ -228,7 +242,9 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         'confusion_matrix': cm.tolist(),
         'all_labels': labels,
         'all_preds': preds,
-        'all_probs': probs
+        'all_probs': probs,
+        'patient_ids': patient_ids,
+        'centers': centers
     }
 
 

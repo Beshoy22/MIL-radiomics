@@ -8,6 +8,7 @@ import seaborn as sns
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
 from sklearn.manifold import TSNE
 from io import BytesIO
+import pandas as pd
 
 def set_seed(seed=42):
     """
@@ -25,6 +26,50 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
     os.environ['PYTHONHASHSEED'] = str(seed)
     print(f"Random seed set to {seed}")
+
+
+def save_predictions_to_csv(patient_ids, labels, predictions, probabilities, centers=None, output_dir=None):
+    """
+    Save predictions to a CSV file.
+    
+    Args:
+        patient_ids (list): List of patient IDs
+        labels (array): True labels
+        predictions (array): Predicted labels
+        probabilities (array): Predicted probabilities for the positive class
+        centers (list, optional): List of centers
+        output_dir (str, optional): Directory to save the CSV file
+        
+    Returns:
+        str: Path to the saved CSV file
+    """
+    # Ensure output directory exists
+    if output_dir is None:
+        output_dir = '.'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create a pandas DataFrame
+    data = {
+        'patient_id': patient_ids,
+        'ground_truth': labels,
+        'prediction': predictions,
+        'probability': probabilities
+    }
+    
+    # Add centers if available
+    if centers is not None:
+        data['center'] = centers
+    
+    df = pd.DataFrame(data)
+    
+    # Generate output file path
+    output_file = os.path.join(output_dir, 'predictions.csv')
+    
+    # Save to CSV
+    df.to_csv(output_file, index=False)
+    print(f"Predictions saved to {output_file}")
+    
+    return output_file
 
 
 def save_model_and_results(model, metrics, history, output_dir, center_metrics=None):
@@ -65,7 +110,7 @@ def save_model_and_results(model, metrics, history, output_dir, center_metrics=N
     
     # Also save the legacy top-level metrics for backward compatibility
     for k, v in metrics.items():
-        if k in ['confusion_matrix', 'all_labels', 'all_preds', 'all_probs', 'all_datasets']:
+        if k in ['confusion_matrix', 'all_labels', 'all_preds', 'all_probs', 'all_datasets', 'patient_ids', 'centers']:
             continue
         if isinstance(v, np.ndarray):
             metrics_json[k] = v.tolist()
@@ -138,6 +183,17 @@ def save_model_and_results(model, metrics, history, output_dir, center_metrics=N
         # Save center metrics to a separate file
         with open(os.path.join(output_dir, 'center_metrics.json'), 'w') as f:
             json.dump(center_metrics_json, f, indent=2)
+    
+    # Save predictions to CSV if available
+    if 'all_labels' in metrics and 'all_preds' in metrics and 'patient_ids' in metrics:
+        save_predictions_to_csv(
+            patient_ids=metrics['patient_ids'],
+            labels=metrics['all_labels'],
+            predictions=metrics['all_preds'],
+            probabilities=metrics['all_probs'],
+            centers=metrics.get('centers'),
+            output_dir=output_dir
+        )
     
     print(f"Model and results saved to {output_dir}")
 

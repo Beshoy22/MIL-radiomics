@@ -66,7 +66,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         # Use tqdm for progress bar
         train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         
-        for features, labels in train_loader_tqdm:
+        for batch in train_loader_tqdm:
+            # Handle different batch formats (with or without identifiers)
+            if len(batch) == 3:  # New format with identifiers
+                features, labels, _ = batch
+            else:  # Old format without identifiers
+                features, labels = batch
+                
             features, labels = features.to(device), labels.to(device)
             
             # Zero the parameter gradients
@@ -108,7 +114,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
         
         with torch.no_grad():
-            for features, labels in val_loader_tqdm:
+            for batch in val_loader_tqdm:
+                # Handle different batch formats (with or without identifiers)
+                if len(batch) == 3:  # New format with identifiers
+                    features, labels, _ = batch
+                else:  # Old format without identifiers
+                    features, labels = batch
+                    
                 features, labels = features.to(device), labels.to(device)
                 
                 outputs = model(features)
@@ -271,20 +283,33 @@ def evaluate_model(model, test_loader, criterion=None,
         all_labels = []
         all_preds = []
         all_probs = []
+        all_patient_ids = []
+        all_centers = []
         
         # Use tqdm for progress tracking
         dataloader_tqdm = tqdm(dataloader, desc=f"Evaluating {name}")
         
         with torch.no_grad():
-            for features, labels in dataloader_tqdm:
+            for batch in dataloader_tqdm:
+                # Handle different batch formats (with or without identifiers)
+                if len(batch) == 3:  # New format with identifiers
+                    features, labels, identifiers = batch
+                    patient_ids = identifiers.get('patient_id', [f"unknown_{i}" for i in range(len(labels))])
+                    centers = identifiers.get('center', ['unknown'] * len(labels))
+                else:  # Old format without identifiers
+                    features, labels = batch
+                    patient_ids = [f"unknown_{i}" for i in range(len(labels))]
+                    centers = ['unknown'] * len(labels)
+                
                 features, labels = features.to(device), labels.to(device)
                 
-                outputs = model(features)
-                
                 if criterion is not None:
+                    outputs = model(features)
                     loss = criterion(outputs, labels)
                     loss_val += loss.item() * features.size(0)
                     dataloader_tqdm.set_postfix(loss=f"{loss.item():.4f}")
+                else:
+                    outputs = model(features)
                 
                 # Get predictions and probabilities
                 probs = torch.softmax(outputs, dim=1)
@@ -293,6 +318,8 @@ def evaluate_model(model, test_loader, criterion=None,
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(preds.cpu().numpy())
                 all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
+                all_patient_ids.extend(patient_ids)
+                all_centers.extend(centers)
         
         # Calculate metrics
         if criterion is not None:
@@ -328,7 +355,9 @@ def evaluate_model(model, test_loader, criterion=None,
             'confusion_matrix': cm,
             'all_labels': all_labels,
             'all_preds': all_preds,
-            'all_probs': all_probs
+            'all_probs': all_probs,
+            'patient_ids': all_patient_ids,
+            'centers': all_centers
         }
     
     # Collect metrics for each dataset
@@ -397,6 +426,8 @@ def evaluate_model(model, test_loader, criterion=None,
         'all_labels': test_metrics['all_labels'],
         'all_preds': test_metrics['all_preds'],
         'all_probs': test_metrics['all_probs'],
+        'patient_ids': test_metrics['patient_ids'],
+        'centers': test_metrics['centers'],
         'all_datasets': metrics  # Include metrics for all datasets
     }
     
@@ -415,8 +446,8 @@ def predict(model, dataloader, return_attention=False,
         device (str): Device to use for inference
         
     Returns:
-        tuple: (labels, predictions, probabilities, attention_weights) if return_attention=True
-               (labels, predictions, probabilities) otherwise
+        tuple: (labels, predictions, probabilities, patient_ids, centers, attention_weights) if return_attention=True
+               (labels, predictions, probabilities, patient_ids, centers) otherwise
     """
     model = model.to(device)
     model.eval()
@@ -424,12 +455,24 @@ def predict(model, dataloader, return_attention=False,
     all_preds = []
     all_probs = []
     all_attns = []
+    all_patient_ids = []
+    all_centers = []
     
     # Use tqdm for progress tracking
     dataloader_tqdm = tqdm(dataloader, desc="Predicting")
     
     with torch.no_grad():
-        for features, labels in dataloader_tqdm:
+        for batch in dataloader_tqdm:
+            # Handle different batch formats (with or without identifiers)
+            if len(batch) == 3:  # New format with identifiers
+                features, labels, identifiers = batch
+                patient_ids = identifiers.get('patient_id', [f"unknown_{i}" for i in range(len(labels))])
+                centers = identifiers.get('center', ['unknown'] * len(labels))
+            else:  # Old format without identifiers
+                features, labels = batch
+                patient_ids = [f"unknown_{i}" for i in range(len(labels))]
+                centers = ['unknown'] * len(labels)
+                
             features, labels = features.to(device), labels.to(device)
             
             # Forward pass with or without attention weights
@@ -446,11 +489,13 @@ def predict(model, dataloader, return_attention=False,
             all_labels.extend(labels.cpu().numpy())
             all_preds.extend(preds.cpu().numpy())
             all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
+            all_patient_ids.extend(patient_ids)
+            all_centers.extend(centers)
     
     if return_attention:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_attns
+        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers, all_attns
     else:
-        return np.array(all_labels), np.array(all_preds), np.array(all_probs)
+        return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers
 
 
 def setup_training(model, learning_rate=1e-4, weight_decay=1e-4, 

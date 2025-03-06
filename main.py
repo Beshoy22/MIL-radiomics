@@ -2,6 +2,7 @@ import os
 import argparse
 import torch
 import json
+import pandas as pd
 
 from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
@@ -10,6 +11,7 @@ from conv_mil_model import create_conv_model
 from lightweight_conv_mil_model import create_lightweight_conv_model
 from model_train import setup_training, train_model, evaluate_model
 from utils import set_seed, save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve, plot_comparison_metrics
+from utils import save_predictions_to_csv
 from cross_validation import create_cached_folds, create_fold_loaders
 from cross_val_training import run_cross_validation
 from metrics_with_ci import evaluate_model_with_ci, plot_metrics_with_ci
@@ -70,6 +72,27 @@ def main(args):
             neptune_run=neptune_run
         )
         
+        # Save CV predictions to CSV
+        fold_predictions = []
+        for fold_idx, metrics in enumerate(fold_metrics):
+            if 'patient_ids' in metrics and 'all_labels' in metrics:
+                for i, patient_id in enumerate(metrics['patient_ids']):
+                    fold_predictions.append({
+                        'fold': fold_idx + 1,
+                        'patient_id': patient_id,
+                        'ground_truth': metrics['all_labels'][i],
+                        'prediction': metrics['all_preds'][i],
+                        'probability': metrics['all_probs'][i],
+                        'center': metrics.get('centers', ['unknown'] * len(metrics['patient_ids']))[i]
+                    })
+        
+        # Save all CV predictions to CSV
+        if fold_predictions:
+            df = pd.DataFrame(fold_predictions)
+            cv_csv_path = os.path.join(args.output_dir, 'cv_predictions.csv')
+            df.to_csv(cv_csv_path, index=False)
+            print(f"Cross-validation predictions saved to {cv_csv_path}")
+        
         # Log final model to Neptune
         if neptune_run:
             log_model(neptune_run, best_model, name="final_model")
@@ -96,6 +119,10 @@ def main(args):
             splitted=args.splitted
         )
         print(f"Data loaders ready")
+        
+        # Set output directory on dataset objects to allow saving predictions
+        if hasattr(test_loader.dataset, '__dict__'):
+            test_loader.dataset.output_dir = args.output_dir
         
         # Log dataset sizes to Neptune
         if neptune_run:
@@ -198,6 +225,17 @@ def main(args):
             n_bootstrap=args.bootstrap_samples,
             neptune_run=neptune_run
         )
+        
+        # Save predictions to CSV
+        if 'patient_ids' in metrics and 'all_labels' in metrics:
+            save_predictions_to_csv(
+                patient_ids=metrics['patient_ids'],
+                labels=metrics['all_labels'],
+                predictions=metrics['all_preds'],
+                probabilities=metrics['all_probs'],
+                centers=metrics.get('centers'),
+                output_dir=args.output_dir
+            )
         
         # Also get standard metrics on all datasets for comparison
         standard_metrics = evaluate_model(
@@ -317,6 +355,11 @@ if __name__ == "__main__":
     parser.add_argument('--min_center_samples', type=int, default=10,
                         help='Minimum number of samples for a center to be included in visualization')
     
+    # Output arguments
+    parser.add_argument('--export_predictions', action='store_true', help='Export patient-level predictions to CSV')
+    parser.add_argument('--predictions_filename', type=str, default='predictions.csv',
+                        help='Filename for exported predictions')
+    
     # Grid search arguments
     parser.add_argument('--grid_search', action='store_true', help='Enable grid search')
     parser.add_argument('--grid_search_top_k', type=int, default=5, help='Number of top models to keep from grid search')
@@ -398,6 +441,25 @@ if __name__ == "__main__":
                 if param in model:
                     print(f"    {param}: {model[param]}")
             print()
+            
+            # Create a combined predictions CSV file for all grid search models
+            combined_predictions = []
+            for j, (_, model_info) in enumerate(top_models.iterrows()):
+                model_dir = model_info['output_dir']
+                predictions_path = os.path.join(model_dir, 'predictions.csv')
+                if os.path.exists(predictions_path):
+                    df = pd.read_csv(predictions_path)
+                    df['model_rank'] = j + 1
+                    for param in param_grid.keys():
+                        if param in model_info:
+                            df[f'param_{param}'] = model_info[param]
+                    combined_predictions.append(df)
+            
+            if combined_predictions:
+                combined_df = pd.concat(combined_predictions, ignore_index=True)
+                combined_path = os.path.join(grid_search_dir, 'all_model_predictions.csv')
+                combined_df.to_csv(combined_path, index=False)
+                print(f"Combined predictions from all models saved to {combined_path}")
     else:
         # Run main function for a single training
         main(args)

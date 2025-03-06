@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import pandas as pd
 
 from transformer_mil_model import create_model
 from lstm_mil_model import create_lstm_model
@@ -11,6 +12,7 @@ from conv_mil_model import create_conv_model
 from lightweight_conv_mil_model import create_lightweight_conv_model
 from model_train import setup_training, train_model
 from utils import save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
+from utils import save_predictions_to_csv
 from neptune_utils import log_figure, log_model
 
 
@@ -38,6 +40,9 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda',
     best_f1_macro = -1  # Changed from f1_weighted to f1_macro
     best_model = None
     best_model_fold = -1
+    
+    # To store all predictions across folds
+    all_fold_predictions = []
     
     # Run training for each fold
     for fold_idx in range(n_folds):
@@ -155,15 +160,37 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda',
             neptune_run=fold_neptune_run
         )
         
+        # Save fold predictions to CSV
+        fold_output_dir = os.path.join(args.output_dir, f'fold_{fold_idx+1}')
+        os.makedirs(fold_output_dir, exist_ok=True)
+        
+        if 'patient_ids' in metrics and 'all_labels' in metrics:
+            predictions_path = save_predictions_to_csv(
+                patient_ids=metrics['patient_ids'],
+                labels=metrics['all_labels'],
+                predictions=metrics['all_preds'],
+                probabilities=metrics['all_probs'],
+                centers=metrics.get('centers'),
+                output_dir=fold_output_dir
+            )
+            
+            # Store predictions for later combination
+            for i, patient_id in enumerate(metrics['patient_ids']):
+                all_fold_predictions.append({
+                    'fold': fold_idx + 1,
+                    'patient_id': patient_id,
+                    'ground_truth': metrics['all_labels'][i],
+                    'prediction': metrics['all_preds'][i],
+                    'probability': metrics['all_probs'][i],
+                    'center': metrics.get('centers', ['unknown'] * len(metrics['patient_ids']))[i]
+                })
+        
         # Store results
         fold_metrics.append(metrics)
         fold_histories.append(history)
         fold_models.append(model)
         
         # Save fold-specific results
-        fold_output_dir = os.path.join(args.output_dir, f'fold_{fold_idx+1}')
-        os.makedirs(fold_output_dir, exist_ok=True)
-        
         save_model_and_results(
             model=model,
             metrics=metrics,
@@ -192,6 +219,13 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda',
     
     # Save the best model separately
     torch.save(best_model.state_dict(), os.path.join(args.output_dir, 'best_model.pt'))
+    
+    # Save combined predictions from all folds
+    if all_fold_predictions:
+        combined_df = pd.DataFrame(all_fold_predictions)
+        combined_path = os.path.join(args.output_dir, 'cv_predictions.csv')
+        combined_df.to_csv(combined_path, index=False)
+        print(f"Combined cross-validation predictions saved to {combined_path}")
     
     # Aggregate and save fold metrics
     aggregate_and_save_cv_metrics(fold_metrics, args.output_dir, neptune_run)

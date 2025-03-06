@@ -60,7 +60,7 @@ def process_pkl_file(pkl_file, endpoint):
             instances_list = pickle.load(f)
             center = os.path.basename(pkl_file)  # Use filename as center identifier
             
-            for instance in instances_list:
+            for idx, instance in enumerate(instances_list):
                 # Skip instances without the specified endpoint
                 if endpoint not in instance:
                     continue
@@ -167,10 +167,15 @@ def process_pkl_file(pkl_file, endpoint):
                 if not isinstance(label, int):
                     label = 1 if label else 0
                 
+                # Create a patient ID from center and index
+                # Try to get an existing ID from instance, if available
+                patient_id = instance.get('patient_id', f"{center}_{idx}")
+                
                 instances.append({
                     'features': processed_features,
                     'label': label,
-                    'center': center
+                    'center': center,
+                    'patient_id': patient_id
                 })
                 
         return max_patches, instances
@@ -260,13 +265,21 @@ class CachedDataset(Dataset):
             
             label = torch.tensor(item['label'], dtype=torch.long)
             
-            return features, label
+            # Get patient identifiers
+            patient_id = item.get('patient_id', f"unknown_{idx}")
+            center = item.get('center', 'unknown')
+            
+            # Return a tuple with features, label, and identifiers
+            identifiers = {'patient_id': patient_id, 'center': center}
+            
+            return features, label, identifiers
         except Exception as e:
             print(f"Error in __getitem__ at idx {idx}: {e}")
             # Return a dummy sample in case of error
             dummy_features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
             dummy_label = torch.tensor(0, dtype=torch.long)
-            return dummy_features, dummy_label
+            dummy_identifiers = {'patient_id': f"error_{idx}", 'center': 'error'}
+            return dummy_features, dummy_label, dummy_identifiers
 
 
 def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.15, seed=42, cache_dir=None):
@@ -408,287 +421,6 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
 
 def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
                         val_size=0.15, test_size=0.15, num_workers=4, seed=42,
-                        use_cache=True, cache_dir=None):
-    """
-    Prepare DataLoaders for training, validation, and testing with improved caching.
-    
-    Args:
-        data_dir (str): Directory containing .pkl files
-        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
-        batch_size (int): Batch size
-        oversample_factor (float): Factor for oversampling minority class (0 to disable)
-        val_size (float): Proportion of data for validation
-        test_size (float): Proportion of data for testing
-        num_workers (int): Number of workers for data loading
-        seed (int): Random seed
-        use_cache (bool): Whether to cache data in memory
-        cache_dir (str, optional): Directory to cache processed data
-    
-    Returns:
-        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics, max_patches)
-    """
-    # Create cache directory if specified and doesn't exist
-    if cache_dir and not os.path.exists(cache_dir):
-        os.makedirs(cache_dir, exist_ok=True)
-    
-    # Compute directory checksum to detect changes
-    dir_checksum = compute_data_dir_checksum(data_dir)
-    
-    # Cached split filename
-    cached_split_file = os.path.join(cache_dir, f"splits_{endpoint}_{val_size}_{test_size}_{seed}_{dir_checksum}.pkl") if cache_dir else None
-    
-    # Check if cached splits exist
-    if cached_split_file and os.path.exists(cached_split_file) and use_cache:
-        print(f"Loading cached splits from {cached_split_file}")
-        with open(cached_split_file, 'rb') as f:
-            cached_data = pickle.load(f)
-            splits = cached_data['splits']
-            max_patches = cached_data['max_patches']
-            class_weights = cached_data['class_weights']
-            metrics = cached_data['metrics']
-    else:
-        # Process data and create splits
-        print(f"Processing data and creating splits (no cached splits found or cache not used)")
-        splits, metrics, max_patches, class_weights = create_cached_splits(
-            data_dir=data_dir,
-            endpoint=endpoint,
-            val_size=val_size,
-            test_size=test_size,
-            seed=seed,
-            cache_dir=cache_dir
-        )
-        
-        # Cache the splits
-        if cached_split_file:
-            with open(cached_split_file, 'wb') as f:
-                pickle.dump({
-                    'splits': splits,
-                    'max_patches': max_patches,
-                    'class_weights': class_weights,
-                    'metrics': metrics
-                }, f)
-    
-    # Create datasets using the cached splits
-    train_dataset = CachedDataset(splits['train_data'], max_patches=max_patches)
-    val_dataset = CachedDataset(splits['val_data'], max_patches=max_patches)
-    test_dataset = CachedDataset(splits['test_data'], max_patches=max_patches)
-    
-    # Create weighted sampler for handling class imbalance if oversampling is enabled
-    train_sampler = None
-    if oversample_factor > 0:
-        train_sampler = create_weighted_sampler(
-            labels=[item['label'] for item in splits['train_data']],
-            oversample_factor=oversample_factor
-        )
-        shuffle = False  # Don't shuffle when using sampler
-    else:
-        shuffle = True  # Shuffle when not using sampler
-    
-    # Create data loaders with our collate_fn
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        shuffle=shuffle if train_sampler is None else False,  # Only shuffle if not using sampler
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    return (
-        train_loader, 
-        val_loader, 
-        test_loader, 
-        class_weights, 
-        metrics, 
-        max_patches
-    )
-
-
-# Keeping the existing functions that don't need to be changed
-def create_weighted_sampler(labels, oversample_factor=1.0):
-    """
-    Create a weighted random sampler for oversampling the minority class.
-    
-    Args:
-        labels (list or array): Class labels
-        oversample_factor (float): Factor to multiply minority class weight
-                                 (1.0 means balanced, >1.0 means more minority samples)
-                                 (0.0 means no oversampling - use uniform sampling)
-    
-    Returns:
-        WeightedRandomSampler or None: Sampler for DataLoader, None if no oversampling
-    """
-    # If oversample_factor is 0, return None to indicate no oversampling
-    if oversample_factor == 0:
-        return None
-        
-    # Count instances per class
-    label_counts = Counter(labels)
-    
-    # Calculate weights per class (inversely proportional to class frequency)
-    n_samples = len(labels)
-    class_weights = {cls: n_samples / count for cls, count in label_counts.items()}
-    
-    # Apply oversample factor to minority class
-    if 0 in class_weights and 1 in class_weights:
-        minority_class = 0 if label_counts[0] < label_counts[1] else 1
-        class_weights[minority_class] *= oversample_factor
-    
-    # Assign weights to each sample
-    weights = [class_weights[label] for label in labels]
-    
-    # Create sampler
-    sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
-    
-    return sampler
-
-
-def collate_fn(batch):
-    """
-    Simplified collate function that stacks the pre-padded tensors.
-    Since all tensors are pre-padded to the same size, we don't need custom padding here.
-    
-    Args:
-        batch (list): List of (features, label) tuples
-        
-    Returns:
-        torch.Tensor: Batched features
-        torch.Tensor: Batched labels
-    """
-    try:
-        features = []
-        labels = []
-        
-        for i, item in enumerate(batch):
-            try:
-                feature, label = item
-                features.append(feature)
-                labels.append(label)
-            except Exception as e:
-                print(f"Error processing batch item {i}: {e}")
-                # Skip problematic items
-                continue
-        
-        if not features:
-            # Return a dummy batch if all items were problematic
-            dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
-            dummy_labels = torch.zeros(1, dtype=torch.long)
-            return dummy_features, dummy_labels
-        
-        # All tensors should be the same size now, so we can simply stack them
-        features_tensor = torch.stack(features)
-        labels_tensor = torch.stack(labels)
-        
-        return features_tensor, labels_tensor
-    except Exception as e:
-        print(f"Error in collate_fn: {e}")
-        # Return a dummy batch in case of error
-        dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
-        dummy_labels = torch.zeros(1, dtype=torch.long)
-        return dummy_features, dummy_labels
-    
-
-# New function to add to dataloader.py
-def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
-    """
-    Load pre-split data from train_set.pkl, val_set.pkl, and test_set.pkl.
-    
-    Args:
-        data_dir (str): Directory containing .pkl files
-        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
-        cache_dir (str, optional): Directory to cache processed data
-        
-    Returns:
-        tuple: (splits, metrics, max_patches, class_weights)
-    """
-    train_file = os.path.join(data_dir, 'train_set.pkl')
-    val_file = os.path.join(data_dir, 'val_set.pkl')
-    test_file = os.path.join(data_dir, 'test_set.pkl')
-    
-    # Check if all files exist
-    if not (os.path.exists(train_file) and os.path.exists(val_file) and os.path.exists(test_file)):
-        raise FileNotFoundError(f"Pre-split files not found in {data_dir}. Need train_set.pkl, val_set.pkl, and test_set.pkl.")
-    
-    print("WARNING: Using pre-split data files. Cross-validation is not allowed in this mode.")
-    print(f"Loading pre-split data from {data_dir}...")
-    
-    # Process each file
-    train_max_patches, train_data = process_pkl_file(train_file, endpoint)
-    val_max_patches, val_data = process_pkl_file(val_file, endpoint)
-    test_max_patches, test_data = process_pkl_file(test_file, endpoint)
-    
-    # Calculate maximum patches across all datasets
-    max_patches = max(train_max_patches, val_max_patches, test_max_patches)
-    
-    # Calculate class weights based on training data
-    train_labels = [instance['label'] for instance in train_data]
-    class_counts = Counter(train_labels)
-    total_samples = len(train_labels)
-    num_classes = len(class_counts)
-    class_weights = torch.tensor(
-        [total_samples / (num_classes * count) for label, count in sorted(class_counts.items())],
-        dtype=torch.float32
-    )
-    
-    # Calculate counts
-    train_count = {'total': len(train_data), 0: class_counts[0], 1: class_counts[1]}
-    
-    val_labels = [instance['label'] for instance in val_data]
-    val_class_counts = Counter(val_labels)
-    val_count = {'total': len(val_data), 0: val_class_counts[0], 1: val_class_counts[1]}
-    
-    test_labels = [instance['label'] for instance in test_data]
-    test_class_counts = Counter(test_labels)
-    test_count = {'total': len(test_data), 0: test_class_counts[0], 1: test_class_counts[1]}
-    
-    # Prepare metrics
-    metrics = {
-        'train_count': train_count['total'],
-        'val_count': val_count['total'],
-        'test_count': test_count['total'],
-        'train_label_counts': {0: train_count[0], 1: train_count[1]},
-        'val_label_counts': {0: val_count[0], 1: val_count[1]},
-        'test_label_counts': {0: test_count[0], 1: test_count[1]}
-    }
-    
-    # Print split statistics
-    print(f"Using pre-split data:")
-    print(f"  Train: {metrics['train_count']} samples, {metrics['train_label_counts']}")
-    print(f"  Validation: {metrics['val_count']} samples, {metrics['val_label_counts']}")
-    print(f"  Test: {metrics['test_count']} samples, {metrics['test_label_counts']}")
-    print(f"  Max patches: {max_patches}")
-    
-    # Create the final splits dictionary
-    splits = {
-        'train_data': train_data,
-        'val_data': val_data,
-        'test_data': test_data
-    }
-    
-    return splits, metrics, max_patches, class_weights
-
-# Modified prepare_dataloaders function
-def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
-                        val_size=0.15, test_size=0.15, num_workers=4, seed=42,
                         use_cache=True, cache_dir=None, splitted=False):
     """
     Prepare DataLoaders for training, validation, and testing with improved caching.
@@ -811,3 +543,188 @@ def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_fac
         metrics, 
         max_patches
     )
+
+
+# Keeping the existing functions that don't need to be changed
+def create_weighted_sampler(labels, oversample_factor=1.0):
+    """
+    Create a weighted random sampler for oversampling the minority class.
+    
+    Args:
+        labels (list or array): Class labels
+        oversample_factor (float): Factor to multiply minority class weight
+                                 (1.0 means balanced, >1.0 means more minority samples)
+                                 (0.0 means no oversampling - use uniform sampling)
+    
+    Returns:
+        WeightedRandomSampler or None: Sampler for DataLoader, None if no oversampling
+    """
+    # If oversample_factor is 0, return None to indicate no oversampling
+    if oversample_factor == 0:
+        return None
+        
+    # Count instances per class
+    label_counts = Counter(labels)
+    
+    # Calculate weights per class (inversely proportional to class frequency)
+    n_samples = len(labels)
+    class_weights = {cls: n_samples / count for cls, count in label_counts.items()}
+    
+    # Apply oversample factor to minority class
+    if 0 in class_weights and 1 in class_weights:
+        minority_class = 0 if label_counts[0] < label_counts[1] else 1
+        class_weights[minority_class] *= oversample_factor
+    
+    # Assign weights to each sample
+    weights = [class_weights[label] for label in labels]
+    
+    # Create sampler
+    sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+    
+    return sampler
+
+
+def collate_fn(batch):
+    """
+    Collate function that handles the new structure that includes patient identifiers.
+    
+    Args:
+        batch (list): List of (features, label, identifiers) tuples
+        
+    Returns:
+        torch.Tensor: Batched features
+        torch.Tensor: Batched labels
+        dict: Dictionary of identifiers lists
+    """
+    try:
+        features = []
+        labels = []
+        patient_ids = []
+        centers = []
+        
+        for i, item in enumerate(batch):
+            try:
+                # Unpack the tuple
+                if len(item) == 3:
+                    feature, label, identifier = item
+                    features.append(feature)
+                    labels.append(label)
+                    patient_ids.append(identifier.get('patient_id', f"unknown_{i}"))
+                    centers.append(identifier.get('center', 'unknown'))
+                else:
+                    # Backward compatibility with old format
+                    feature, label = item
+                    features.append(feature)
+                    labels.append(label)
+                    patient_ids.append(f"unknown_{i}")
+                    centers.append('unknown')
+            except Exception as e:
+                print(f"Error processing batch item {i}: {e}")
+                # Skip problematic items
+                continue
+        
+        if not features:
+            # Return a dummy batch if all items were problematic
+            dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
+            dummy_labels = torch.zeros(1, dtype=torch.long)
+            dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
+            return dummy_features, dummy_labels, dummy_identifiers
+        
+        # All tensors should be the same size now, so we can simply stack them
+        features_tensor = torch.stack(features)
+        labels_tensor = torch.stack(labels)
+        
+        # Combine identifiers
+        identifiers = {
+            'patient_id': patient_ids,
+            'center': centers
+        }
+        
+        return features_tensor, labels_tensor, identifiers
+    except Exception as e:
+        print(f"Error in collate_fn: {e}")
+        # Return a dummy batch in case of error
+        dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
+        dummy_labels = torch.zeros(1, dtype=torch.long)
+        dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
+        return dummy_features, dummy_labels, dummy_identifiers
+
+
+# New function to add to dataloader.py
+def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
+    """
+    Load pre-split data from train_set.pkl, val_set.pkl, and test_set.pkl.
+    
+    Args:
+        data_dir (str): Directory containing .pkl files
+        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
+        cache_dir (str, optional): Directory to cache processed data
+        
+    Returns:
+        tuple: (splits, metrics, max_patches, class_weights)
+    """
+    train_file = os.path.join(data_dir, 'train_set.pkl')
+    val_file = os.path.join(data_dir, 'val_set.pkl')
+    test_file = os.path.join(data_dir, 'test_set.pkl')
+    
+    # Check if all files exist
+    if not (os.path.exists(train_file) and os.path.exists(val_file) and os.path.exists(test_file)):
+        raise FileNotFoundError(f"Pre-split files not found in {data_dir}. Need train_set.pkl, val_set.pkl, and test_set.pkl.")
+    
+    print("WARNING: Using pre-split data files. Cross-validation is not allowed in this mode.")
+    print(f"Loading pre-split data from {data_dir}...")
+    
+    # Process each file
+    train_max_patches, train_data = process_pkl_file(train_file, endpoint)
+    val_max_patches, val_data = process_pkl_file(val_file, endpoint)
+    test_max_patches, test_data = process_pkl_file(test_file, endpoint)
+    
+    # Calculate maximum patches across all datasets
+    max_patches = max(train_max_patches, val_max_patches, test_max_patches)
+    
+    # Calculate class weights based on training data
+    train_labels = [instance['label'] for instance in train_data]
+    class_counts = Counter(train_labels)
+    total_samples = len(train_labels)
+    num_classes = len(class_counts)
+    class_weights = torch.tensor(
+        [total_samples / (num_classes * count) for label, count in sorted(class_counts.items())],
+        dtype=torch.float32
+    )
+    
+    # Calculate counts
+    train_count = {'total': len(train_data), 0: class_counts[0], 1: class_counts[1]}
+    
+    val_labels = [instance['label'] for instance in val_data]
+    val_class_counts = Counter(val_labels)
+    val_count = {'total': len(val_data), 0: val_class_counts[0], 1: val_class_counts[1]}
+    
+    test_labels = [instance['label'] for instance in test_data]
+    test_class_counts = Counter(test_labels)
+    test_count = {'total': len(test_data), 0: test_class_counts[0], 1: test_class_counts[1]}
+    
+    # Prepare metrics
+    metrics = {
+        'train_count': train_count['total'],
+        'val_count': val_count['total'],
+        'test_count': test_count['total'],
+        'train_label_counts': {0: train_count[0], 1: train_count[1]},
+        'val_label_counts': {0: val_count[0], 1: val_count[1]},
+        'test_label_counts': {0: test_count[0], 1: test_count[1]}
+    }
+    
+    # Print split statistics
+    print(f"Using pre-split data:")
+    print(f"  Train: {metrics['train_count']} samples, {metrics['train_label_counts']}")
+    print(f"  Validation: {metrics['val_count']} samples, {metrics['val_label_counts']}")
+    print(f"  Test: {metrics['test_count']} samples, {metrics['test_label_counts']}")
+    print(f"  Max patches: {max_patches}")
+    
+    # Create the final splits dictionary
+    splits = {
+        'train_data': train_data,
+        'val_data': val_data,
+        'test_data': test_data
+    }
+    
+    return splits, metrics, max_patches, class_weights
