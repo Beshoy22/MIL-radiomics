@@ -1,17 +1,7 @@
 {
   "lr": [1e-5, 5e-5, 1e-4, 5e-4],
   "dropout": [0.1, 0.3, 0.5],
-  "hidden_dim": [64, 128, 256],
+  "hidden_dim": [32, 64, 128, 256],
   
-  "# Transformer specific parameters": null,
-  "num_heads": [2, 4, 8],
-  "num_layers": [1, 2, 3],
-  
-  "# LSTM specific parameters": null,
-  "bidirectional": [true, false],
-  "use_attention": [true, false],
-  
-  "# Convolutional model specific parameters": null,
-  "num_groups": [5, 10, 20],
-  "num_blocks": [1, 2, 3]
+  "use_attention": [false]
 }
