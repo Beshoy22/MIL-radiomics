@@ -1,6 +1,7 @@
 import os
 import argparse
 import torch
+import json
 
 from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
@@ -22,6 +23,11 @@ def main(args):
     
     Args:
         args: Command line arguments
+        
+    Returns:
+        tuple: (model, metrics, history) or 
+               (model, metrics, history, center_metrics) if not using cross-validation,
+               (best_model, fold_metrics, fold_histories) if using cross-validation
     """
     # Initialize Neptune logging if enabled
     neptune_run = None
@@ -67,8 +73,6 @@ def main(args):
         # Log final model to Neptune
         if neptune_run:
             log_model(neptune_run, best_model, name="final_model")
-        
-        if neptune_run:
             neptune_run.stop()
         
         return best_model, fold_metrics, fold_histories
@@ -89,7 +93,7 @@ def main(args):
             seed=args.seed,
             use_cache=args.use_cache,
             cache_dir=args.cache_dir,
-            splitted=args.splitted  # Pass the new splitted argument
+            splitted=args.splitted
         )
         print(f"Data loaders ready")
         
@@ -122,7 +126,7 @@ def main(args):
                 bidirectional=args.bidirectional,
                 num_classes=len(class_weights),
                 max_patches=max_patches,
-                use_attention=args.use_attention,  # Use the new attention flag
+                use_attention=args.use_attention,
                 device=device
             )
             print(f"LSTM model ready (with {'attention' if args.use_attention else 'pooling'})")
@@ -206,7 +210,7 @@ def main(args):
             neptune_run=neptune_run
         )
         
-        # NEW: Center-based evaluation
+        # Center-based evaluation
         print(f"Evaluating {args.model_type} model by center...")
         center_metrics = evaluate_by_center(
             model=model,
@@ -215,23 +219,23 @@ def main(args):
             neptune_run=neptune_run
         )
         
-        # NEW: Plot center-based metrics
+        # Plot center-based metrics
         print(f"Plotting center-based metrics...")
         plot_center_metrics(
             center_metrics=center_metrics,
             key_metrics=['f1_macro', 'auc'],
             output_dir=args.output_dir,
             neptune_run=neptune_run,
-            min_samples=args.min_center_samples  # Only include centers with at least this many samples
+            min_samples=args.min_center_samples
         )
         
         # Save model and results
         save_model_and_results(
             model=model,
-            metrics=metrics,  # Use metrics with confidence intervals
+            metrics=metrics,
             history=history,
             output_dir=args.output_dir,
-            center_metrics=center_metrics  # Save center metrics as well
+            center_metrics=center_metrics
         )
         
         # Plot results
@@ -313,6 +317,14 @@ if __name__ == "__main__":
     parser.add_argument('--min_center_samples', type=int, default=10,
                         help='Minimum number of samples for a center to be included in visualization')
     
+    # Grid search arguments
+    parser.add_argument('--grid_search', action='store_true', help='Enable grid search')
+    parser.add_argument('--grid_search_top_k', type=int, default=5, help='Number of top models to keep from grid search')
+    parser.add_argument('--grid_search_config', type=str, default=None, 
+                        help='Path to grid search configuration JSON file')
+    parser.add_argument('--create_sample_grid_config', action='store_true',
+                        help='Create a sample grid search configuration file and exit')
+    
     # Neptune logging argument
     parser.add_argument('--use_neptune', action='store_true', help='Enable Neptune logging')
     
@@ -323,6 +335,15 @@ if __name__ == "__main__":
     parser.add_argument('--cpu', action='store_true', help='Use CPU even if GPU is available')
     
     args = parser.parse_args()
+    
+    # Create sample grid search config if requested
+    if args.create_sample_grid_config:
+        from gridsearch import create_sample_grid_search_config
+        config_path = create_sample_grid_search_config()
+        print(f"Sample grid search configuration created at: {config_path}")
+        print("You can use this as a starting point and modify it for your needs.")
+        print(f"To use it, run with: --grid_search --grid_search_config {config_path}")
+        exit(0)
     
     # Set default output directory if not specified
     if args.output_dir is None:
@@ -338,5 +359,45 @@ if __name__ == "__main__":
     if args.cache_dir:
         os.makedirs(args.cache_dir, exist_ok=True)
     
-    # Run main function
-    main(args)
+    # Run grid search if enabled
+    if args.grid_search:
+        from gridsearch import run_grid_search, load_grid_search_config, get_default_param_grid
+        
+        # Load or create parameter grid
+        if args.grid_search_config:
+            param_grid = load_grid_search_config(args.grid_search_config)
+            if param_grid is None:
+                # If loading fails, use default grid
+                param_grid = get_default_param_grid(args.model_type)
+        else:
+            # Use default parameter grid
+            param_grid = get_default_param_grid(args.model_type)
+        
+        print(f"Running grid search with the following parameter grid:")
+        print(json.dumps(param_grid, indent=2))
+        
+        # Run grid search
+        top_models, grid_search_dir = run_grid_search(
+            args=args,
+            param_grid=param_grid,
+            top_k=args.grid_search_top_k,
+            main_func=main
+        )
+        
+        print(f"\nGrid search completed. Results saved to {grid_search_dir}")
+        print("\nTop models:")
+        for i, (_, model) in enumerate(top_models.iterrows()):
+            print(f"Rank {i+1}: Validation F1 Macro: {model.get('val_f1_macro', 'N/A')}")
+            if 'test_f1_macro' in model and 'test_f1_macro_ci_low' in model and 'test_f1_macro_ci_high' in model:
+                print(f"  Test F1 Macro: {model['test_f1_macro']:.4f} (95% CI: {model['test_f1_macro_ci_low']:.4f}-{model['test_f1_macro_ci_high']:.4f})")
+            print(f"  Directory: {model['output_dir']}")
+            
+            # Print hyperparameters of this model
+            print("  Hyperparameters:")
+            for param in param_grid.keys():
+                if param in model:
+                    print(f"    {param}: {model[param]}")
+            print()
+    else:
+        # Run main function for a single training
+        main(args)
