@@ -88,7 +88,7 @@ python main.py --data_dir /path/to/data --model_type lightweight_conv --use_nept
 
 - `--data_dir`: Path to the directory containing data files
 - `--model_type`: Type of model architecture (`transformer`, `lstm`, `conv`, or `lightweight_conv`)
-- `--endpoint`: Endpoint to use for classification (`OS_6` or `OS_24`)
+- `--endpoint`: Endpoint to use for classification (`OS_6` or `OS_24` or binary class)
 - `--cv_folds`: Number of folds for cross-validation (default: 1, meaning no cross-validation)
 - `--use_neptune`: Enable Neptune.ai logging
 - `--output_dir`: Directory to save outputs (default: `./outputs/{model_type}`)
