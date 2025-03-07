@@ -11,6 +11,7 @@ import copy
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns
+from verbose_utils import logger, set_verbose_mode
 
 def run_grid_search(args, param_grid, top_k=5, main_func=None):
     """
@@ -25,6 +26,11 @@ def run_grid_search(args, param_grid, top_k=5, main_func=None):
     Returns:
         tuple: (top_k_models, grid_search_dir)
     """
+    # Enable verbose mode if specified
+    if hasattr(args, 'verbose') and args.verbose:
+        set_verbose_mode(True)
+        logger.log("Running grid search with verbose mode enabled")
+    
     if main_func is None:
         # Import here to avoid circular imports
         from main import main as main_func
@@ -34,6 +40,12 @@ def run_grid_search(args, param_grid, top_k=5, main_func=None):
     param_values = list(itertools.product(*[param_grid[name] for name in param_names]))
     
     total_combinations = len(param_values)
+    if hasattr(args, 'verbose') and args.verbose:
+        logger.log(f"Grid search parameters:")
+        for name in param_names:
+            logger.log(f"  {name}: {param_grid[name]}")
+        logger.log(f"Total combinations: {total_combinations}")
+    
     print(f"Running grid search with {total_combinations} combinations")
     
     # Create a directory to store grid search results
@@ -49,9 +61,12 @@ def run_grid_search(args, param_grid, top_k=5, main_func=None):
     results = []
     
     # Run training for each parameter combination
-    for i, param_combination in enumerate(tqdm(param_values, desc="Grid search progress")):
+    for i, param_combination in enumerate(tqdm(param_values, desc="Grid search progress", position=0)):
         # Create a copy of arguments and update with current parameters
         current_args = copy.deepcopy(args)
+        
+        # Mark this run as part of a grid search to handle tqdm properly
+        current_args.is_grid_search = True
         
         # Update args with current parameter values
         for name, value in zip(param_names, param_combination):
@@ -77,14 +92,15 @@ def run_grid_search(args, param_grid, top_k=5, main_func=None):
             # Remember start time
             start_time = time.time()
             
-            # Run training with current parameters
-            if current_args.cv_folds > 1:
-                # Cross-validation mode
-                model, fold_metrics, history = main_func(current_args)
-                metrics = fold_metrics[0]  # Use the first fold for simplicity in this case
-            else:
-                # Standard mode
-                model, metrics, history, _ = main_func(current_args)
+            # Run training with current parameters - disable nested progress bars
+            with tqdm.external_write_mode():
+                if current_args.cv_folds > 1:
+                    # Cross-validation mode
+                    model, fold_metrics, history = main_func(current_args)
+                    metrics = fold_metrics[0]  # Use the first fold for simplicity in this case
+                else:
+                    # Standard mode
+                    model, metrics, history, _ = main_func(current_args)
             
             # Calculate elapsed time
             elapsed_time = time.time() - start_time
@@ -123,6 +139,13 @@ def run_grid_search(args, param_grid, top_k=5, main_func=None):
             # Save current results to interim CSV to keep track of progress
             results_df = pd.DataFrame(results)
             results_df.to_csv(os.path.join(grid_search_dir, "interim_results.csv"), index=False)
+            
+            # Print a summary of the results so far
+            print(f"\nCombination {i+1}/{total_combinations} completed in {elapsed_time/60:.2f} minutes")
+            if "val_f1_macro" in result:
+                print(f"  Val F1 Macro: {result['val_f1_macro']:.4f}")
+            if "test_f1_macro" in result:
+                print(f"  Test F1 Macro: {result['test_f1_macro']:.4f}")
             
         except Exception as e:
             print(f"Error in combination {combination_id}: {e}")

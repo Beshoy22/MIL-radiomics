@@ -4,6 +4,7 @@ import torch
 import json
 import pandas as pd
 
+from verbose_utils import set_verbose_mode, configure_tqdm_for_grid_search, logger
 from dataloader import prepare_dataloaders
 from transformer_mil_model import create_model
 from lstm_mil_model import create_lstm_model
@@ -31,19 +32,34 @@ def main(args):
                (model, metrics, history, center_metrics) if not using cross-validation,
                (best_model, fold_metrics, fold_histories) if using cross-validation
     """
+    # Configure verbose mode
+    verbose_logger = set_verbose_mode(args.verbose)
+    
+    # Configure tqdm for grid search mode
+    configure_tqdm_for_grid_search(args.is_grid_search)
+    
+    # Log execution info in verbose mode
+    if args.verbose:
+        verbose_logger.header("MIL FRAMEWORK EXECUTION")
+        verbose_logger.log(f"Running with arguments:")
+        for arg, value in vars(args).items():
+            verbose_logger.log(f"  {arg}: {value}")
+    
     # Initialize Neptune logging if enabled
     neptune_run = None
     if args.use_neptune:
+        verbose_logger.log("Initializing Neptune logging...")
         neptune_run = init_neptune_run(args)
         if neptune_run:
-            print("Neptune logging initialized")
+            verbose_logger.log("Neptune logging initialized successfully")
     
     # Set seed for reproducibility
+    verbose_logger.log("Setting random seed for reproducibility...")
     set_seed(args.seed)
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
-    print(f"Using device: {device}")
+    verbose_logger.log(f"Using device: {device}")
     
     # Check for incompatible options
     if args.cv_folds > 1 and args.splitted:
@@ -51,18 +67,24 @@ def main(args):
     
     if args.cv_folds > 1:
         # Cross-validation mode
-        print(f"Using {args.cv_folds}-fold cross-validation")
+        verbose_logger.subheader(f"STARTING {args.cv_folds}-FOLD CROSS-VALIDATION")
         
         # Create folds
-        folds, max_patches, class_weights = create_cached_folds(
-            data_dir=args.data_dir,
-            endpoint=args.endpoint,
-            n_folds=args.cv_folds,
-            seed=args.seed,
-            cache_dir=args.cache_dir
-        )
+        with verbose_logger.section("Creating cross-validation folds"):
+            folds, max_patches, class_weights = create_cached_folds(
+                data_dir=args.data_dir,
+                endpoint=args.endpoint,
+                n_folds=args.cv_folds,
+                seed=args.seed,
+                cache_dir=args.cache_dir
+            )
+            
+            if args.verbose:
+                verbose_logger.log(f"Created {len(folds)} folds with max_patches={max_patches}")
+                verbose_logger.log(f"Class weights: {class_weights}")
         
         # Run cross-validation
+        verbose_logger.log("Starting cross-validation training...")
         best_model, fold_metrics, fold_histories = run_cross_validation(
             args=args,
             folds=folds,
@@ -293,6 +315,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train MIL model for CT patch embeddings')
+    
+    # Add verbose flag to parser
+    parser.add_argument('--verbose', action='store_true', 
+                        help='Enable verbose output with detailed information for debugging')
     
     # Model type
     parser.add_argument('--model_type', type=str, default='transformer', 

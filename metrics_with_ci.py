@@ -6,10 +6,11 @@ from sklearn.metrics import (
     f1_score, roc_auc_score, confusion_matrix
 )
 from io import BytesIO
-
+from verbose_utils import logger
 
 def predict(model, dataloader, return_attention=False, 
-           device='cuda' if torch.cuda.is_available() else 'cpu'):
+           device='cuda' if torch.cuda.is_available() else 'cpu',
+           verbose=False):
     """
     Make predictions using a trained model.
     
@@ -18,6 +19,7 @@ def predict(model, dataloader, return_attention=False,
         dataloader (DataLoader): DataLoader with data
         return_attention (bool): Whether to return attention weights
         device (str): Device to use for inference
+        verbose (bool): Whether to print verbose debugging information
         
     Returns:
         tuple: (labels, predictions, probabilities, patient_ids, centers, attention_weights) if return_attention=True
@@ -32,8 +34,17 @@ def predict(model, dataloader, return_attention=False,
     all_patient_ids = []
     all_centers = []
     
+    if verbose:
+        logger.log(f"Making predictions on {len(dataloader.dataset)} samples")
+        logger.log(f"Model: {type(model).__name__}")
+        logger.log(f"Return attention: {return_attention}")
+    
+    batch_times = []
+    
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Predicting"):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Predicting")):
+            batch_start = time.time()
+            
             # Handle different return formats from the dataloader
             if len(batch) == 3:  # New format with identifiers
                 features, labels, identifiers = batch
@@ -43,6 +54,10 @@ def predict(model, dataloader, return_attention=False,
                 features, labels = batch
                 patient_ids = [f"unknown_{i}" for i in range(len(labels))]
                 centers = ['unknown'] * len(labels)
+            
+            if verbose and batch_idx == 0:  # Only log the first batch
+                logger.tensor_info("Input features", features)
+                logger.tensor_info("Labels", labels)
                 
             features, labels = features.to(device), labels.to(device)
             
@@ -50,8 +65,14 @@ def predict(model, dataloader, return_attention=False,
             if return_attention and hasattr(model, 'forward') and 'return_attn' in model.forward.__code__.co_varnames:
                 outputs, attn_weights = model(features, return_attn=True)
                 all_attns.extend(attn_weights.cpu().numpy())
+                
+                if verbose and batch_idx == 0:  # Only log the first batch
+                    logger.tensor_info("Attention weights", attn_weights)
             else:
                 outputs = model(features)
+            
+            if verbose and batch_idx == 0:  # Only log the first batch
+                logger.tensor_info("Model outputs", outputs)
             
             # Get predictions and probabilities
             probs = torch.softmax(outputs, dim=1)
@@ -62,6 +83,21 @@ def predict(model, dataloader, return_attention=False,
             all_probs.extend(probs[:, 1].cpu().numpy())  # Probability of positive class
             all_patient_ids.extend(patient_ids)
             all_centers.extend(centers)
+            
+            batch_end = time.time()
+            batch_times.append(batch_end - batch_start)
+    
+    if verbose:
+        avg_batch_time = sum(batch_times) / len(batch_times) if batch_times else 0
+        logger.log(f"Prediction completed:")
+        logger.log(f"  Average batch processing time: {avg_batch_time:.4f}s")
+        logger.log(f"  Total samples processed: {len(all_labels)}")
+        logger.log(f"  Unique centers: {len(set(all_centers))}")
+        
+        # Log class distribution
+        labels_array = np.array(all_labels)
+        class_counts = {label: np.sum(labels_array == label) for label in np.unique(labels_array)}
+        logger.log(f"  Class distribution: {class_counts}")
     
     if return_attention:
         return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers, all_attns
@@ -69,7 +105,7 @@ def predict(model, dataloader, return_attention=False,
         return np.array(all_labels), np.array(all_preds), np.array(all_probs), all_patient_ids, all_centers
 
 
-def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confidence=0.95):
+def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confidence=0.95, verbose=False):
     """
     Calculate a metric with bootstrap confidence intervals.
     
@@ -80,19 +116,32 @@ def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confiden
         metric_fn (callable): Function to calculate the metric
         n_bootstrap (int): Number of bootstrap samples
         confidence (float): Confidence level (0-1)
+        verbose (bool): Whether to print verbose debugging information
         
     Returns:
         tuple: (metric_value, confidence_interval)
     """
     n_samples = len(labels)
     
+    if verbose:
+        logger.log(f"Bootstrap metric calculation:")
+        logger.log(f"  Samples: {n_samples}")
+        logger.log(f"  Bootstrap iterations: {n_bootstrap}")
+        logger.log(f"  Confidence level: {confidence}")
+        logger.log(f"  Metric function: {metric_fn.__name__}")
+    
     # Calculate metric on full dataset
     metric_value = metric_fn(labels, preds, probs)
+    
+    if verbose:
+        logger.log(f"  Full dataset metric value: {metric_value:.4f}")
     
     # Calculate bootstrap confidence interval
     bootstrap_values = []
     
-    for _ in range(n_bootstrap):
+    bootstrap_progress = tqdm(range(n_bootstrap), desc=f"Bootstrap {metric_fn.__name__}") if verbose else range(n_bootstrap)
+    
+    for _ in bootstrap_progress:
         # Sample with replacement
         indices = np.random.choice(n_samples, n_samples, replace=True)
         bootstrap_labels = labels[indices]
@@ -121,10 +170,18 @@ def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confiden
     if upper_idx >= n_bootstrap:
         upper_idx = n_bootstrap - 1
     
-    return metric_value, [float(bootstrap_values[lower_idx]), float(bootstrap_values[upper_idx])]
+    ci = [float(bootstrap_values[lower_idx]), float(bootstrap_values[upper_idx])]
+    
+    if verbose:
+        logger.log(f"  Confidence interval: [{ci[0]:.4f}, {ci[1]:.4f}]")
+        logger.log(f"  Bootstrap mean: {np.mean(bootstrap_values):.4f}")
+        logger.log(f"  Bootstrap std: {np.std(bootstrap_values):.4f}")
+    
+    return metric_value, ci
 
 
-def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, confidence=0.95, neptune_run=None):
+def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, confidence=0.95, 
+                          neptune_run=None, verbose=False):
     """
     Evaluate model with confidence intervals for all metrics.
     
@@ -135,15 +192,28 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         n_bootstrap (int): Number of bootstrap samples
         confidence (float): Confidence level (0-1)
         neptune_run: Neptune run object for logging (optional)
+        verbose (bool): Whether to print verbose debugging information
         
     Returns:
         dict: Evaluation metrics with confidence intervals
     """
+    if verbose:
+        logger.log("Starting model evaluation with confidence intervals")
+        logger.log(f"  Bootstrap samples: {n_bootstrap}")
+        logger.log(f"  Confidence level: {confidence}")
+    
     # Get predictions
-    labels, preds, probs, patient_ids, centers = predict(model, dataloader, device=device)
+    with logger.section("Making predictions"):
+        labels, preds, probs, patient_ids, centers = predict(
+            model, dataloader, device=device, verbose=verbose
+        )
     
     # Calculate confusion matrix
     cm = confusion_matrix(labels, preds)
+    
+    if verbose:
+        logger.log("Confusion matrix:")
+        logger.log(f"{cm}")
     
     # Define metric functions
     def accuracy_fn(y_true, y_pred, _):
@@ -171,18 +241,34 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         return roc_auc_score(y_true, y_prob)
     
     # Calculate metrics with confidence intervals
-    print("Calculating metrics with confidence intervals...")
-    accuracy, accuracy_ci = bootstrap_metric(labels, preds, probs, accuracy_fn, n_bootstrap, confidence)
-    precision, precision_ci = bootstrap_metric(labels, preds, probs, precision_fn, n_bootstrap, confidence)
-    recall, recall_ci = bootstrap_metric(labels, preds, probs, recall_fn, n_bootstrap, confidence)
-    f1, f1_ci = bootstrap_metric(labels, preds, probs, f1_fn, n_bootstrap, confidence)
-    f1_macro, f1_macro_ci = bootstrap_metric(labels, preds, probs, f1_macro_fn, n_bootstrap, confidence)
-    f1_weighted, f1_weighted_ci = bootstrap_metric(labels, preds, probs, f1_weighted_fn, n_bootstrap, confidence)
+    if verbose:
+        logger.log("Calculating metrics with confidence intervals...")
+    
+    with logger.section("Calculating accuracy"):
+        accuracy, accuracy_ci = bootstrap_metric(labels, preds, probs, accuracy_fn, n_bootstrap, confidence, verbose)
+    
+    with logger.section("Calculating precision"):
+        precision, precision_ci = bootstrap_metric(labels, preds, probs, precision_fn, n_bootstrap, confidence, verbose)
+    
+    with logger.section("Calculating recall"):
+        recall, recall_ci = bootstrap_metric(labels, preds, probs, recall_fn, n_bootstrap, confidence, verbose)
+    
+    with logger.section("Calculating F1"):
+        f1, f1_ci = bootstrap_metric(labels, preds, probs, f1_fn, n_bootstrap, confidence, verbose)
+    
+    with logger.section("Calculating F1 Macro"):
+        f1_macro, f1_macro_ci = bootstrap_metric(labels, preds, probs, f1_macro_fn, n_bootstrap, confidence, verbose)
+    
+    with logger.section("Calculating F1 Weighted"):
+        f1_weighted, f1_weighted_ci = bootstrap_metric(labels, preds, probs, f1_weighted_fn, n_bootstrap, confidence, verbose)
     
     # AUC might fail if only one class is present in some bootstrap samples
     try:
-        auc, auc_ci = bootstrap_metric(labels, preds, probs, auc_fn, n_bootstrap, confidence)
-    except:
+        with logger.section("Calculating AUC"):
+            auc, auc_ci = bootstrap_metric(labels, preds, probs, auc_fn, n_bootstrap, confidence, verbose)
+    except Exception as e:
+        if verbose:
+            logger.log(f"Error calculating AUC: {e}")
         auc, auc_ci = 0.5, [0.0, 1.0]
     
     # Print metrics with confidence intervals

@@ -10,11 +10,12 @@ from sklearn.metrics import (
     f1_score, roc_auc_score, confusion_matrix
 )
 
+from verbose_utils import logger
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, 
                 scheduler=None, num_epochs=100, early_stopping_patience=10,
                 device='cuda' if torch.cuda.is_available() else 'cpu',
-                selection_metric='f1_macro', neptune_run=None):
+                selection_metric='f1_macro', neptune_run=None, verbose=False):
     """
     Train the model.
     
@@ -32,6 +33,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                                'f1_macro' - Uses F1 macro score (higher is better)
                                'val_loss' - Uses validation loss (lower is better)
         neptune_run: Neptune run object for logging (optional)
+        verbose (bool): Whether to print verbose debugging information
         
     Returns:
         model: Trained model
@@ -42,6 +44,20 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
     best_f1_macro = -1.0  # Track best F1 macro
     best_model_state = None
     patience_counter = 0
+    
+    if verbose:
+        logger.log("Training setup:")
+        logger.log(f"  Device: {device}")
+        logger.log(f"  Model type: {type(model).__name__}")
+        logger.log(f"  Optimizer: {type(optimizer).__name__}")
+        logger.log(f"  Criterion: {type(criterion).__name__}")
+        logger.log(f"  Scheduler: {type(scheduler).__name__ if scheduler else None}")
+        logger.log(f"  Num epochs: {num_epochs}")
+        logger.log(f"  Early stopping patience: {early_stopping_patience}")
+        logger.log(f"  Selection metric: {selection_metric}")
+        logger.log(f"  Training samples: {len(train_loader.dataset)}")
+        logger.log(f"  Validation samples: {len(val_loader.dataset)}")
+        logger.log(f"  Batch size: {train_loader.batch_size if hasattr(train_loader, 'batch_size') else 'Unknown'}")
     
     history = {
         'train_loss': [],
@@ -63,16 +79,26 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         train_correct = 0
         train_total = 0
         
+        if verbose:
+            logger.log(f"Epoch {epoch+1}/{num_epochs} Training", timestamp=True)
+        
         # Use tqdm for progress bar
         train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         
-        for batch in train_loader_tqdm:
+        batch_times = []
+        for batch_idx, batch in enumerate(train_loader_tqdm):
+            batch_start = time.time()
+            
             # Handle different batch formats (with or without identifiers)
             if len(batch) == 3:  # New format with identifiers
                 features, labels, _ = batch
             else:  # Old format without identifiers
                 features, labels = batch
                 
+            if verbose and batch_idx == 0:  # Only log the first batch
+                logger.tensor_info("Input features", features)
+                logger.tensor_info("Labels", labels)
+            
             features, labels = features.to(device), labels.to(device)
             
             # Zero the parameter gradients
@@ -80,6 +106,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             
             # Forward pass
             outputs = model(features)
+            
+            if verbose and batch_idx == 0:  # Only log the first batch
+                logger.tensor_info("Model outputs", outputs)
+            
             loss = criterion(outputs, labels)
             
             # Backward pass and optimize
@@ -97,10 +127,19 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 loss=f"{loss.item():.4f}", 
                 acc=f"{100.0 * (predicted == labels).sum().item() / labels.size(0):.2f}%"
             )
+            
+            batch_end = time.time()
+            batch_times.append(batch_end - batch_start)
         
         # Calculate epoch statistics
         train_loss = train_loss / len(train_loader.dataset)
         train_acc = 100 * train_correct / train_total
+        
+        if verbose:
+            avg_batch_time = sum(batch_times) / len(batch_times) if batch_times else 0
+            logger.log(f"  Avg batch processing time: {avg_batch_time:.4f}s")
+            logger.log(f"  Train loss: {train_loss:.4f}")
+            logger.log(f"  Train accuracy: {train_acc:.2f}%")
         
         # Validation phase
         model.eval()
@@ -110,11 +149,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         all_val_labels = []
         all_val_preds = []
         
+        if verbose:
+            logger.log(f"Epoch {epoch+1}/{num_epochs} Validation", timestamp=True)
+        
         # Use tqdm for progress bar
         val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
         
         with torch.no_grad():
-            for batch in val_loader_tqdm:
+            for batch_idx, batch in enumerate(val_loader_tqdm):
                 # Handle different batch formats (with or without identifiers)
                 if len(batch) == 3:  # New format with identifiers
                     features, labels, _ = batch
@@ -149,12 +191,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
         val_f1_macro = f1_score(all_val_labels, all_val_preds, average='macro', zero_division=0)
         val_f1_weighted = f1_score(all_val_labels, all_val_preds, average='weighted', zero_division=0)
         
+        if verbose:
+            logger.log(f"  Val loss: {val_loss:.4f}")
+            logger.log(f"  Val accuracy: {val_acc:.2f}%")
+            logger.log(f"  Val F1 macro: {val_f1_macro:.4f}")
+            logger.log(f"  Val F1 weighted: {val_f1_weighted:.4f}")
+        
         # Update learning rate
         if scheduler is not None:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_loss)  # Still use val_loss for scheduler
+                if verbose:
+                    logger.log(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
             else:
                 scheduler.step()
+                if verbose:
+                    logger.log(f"  Current LR: {optimizer.param_groups[0]['lr']:.6f}")
         
         # Store statistics
         history['train_loss'].append(train_loss)
@@ -203,6 +255,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 best_f1_macro = val_f1_macro
                 best_model_state = copy.deepcopy(model.state_dict())
                 improved = True
+                if verbose:
+                    logger.log(f"  New best model (F1 Macro: {best_f1_macro:.4f})")
                 print(f"New best model (F1 Macro: {best_f1_macro:.4f})")
                 
                 # Log best model metrics to Neptune
@@ -215,6 +269,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 best_val_loss = val_loss
                 best_model_state = copy.deepcopy(model.state_dict())
                 improved = True
+                if verbose:
+                    logger.log(f"  New best model (Val Loss: {best_val_loss:.4f})")
                 print(f"New best model (Val Loss: {best_val_loss:.4f})")
                 
                 # Log best model metrics to Neptune
@@ -230,6 +286,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
             patience_counter = 0
         else:
             patience_counter += 1
+            if verbose:
+                logger.log(f"  No improvement for {patience_counter} epochs (patience: {early_stopping_patience})")
             
         # Early stopping
         if patience_counter >= early_stopping_patience:
@@ -237,14 +295,20 @@ def train_model(model, train_loader, val_loader, criterion, optimizer,
                 neptune_run["training/early_stopping"] = True
                 neptune_run["training/stopped_epoch"] = epoch + 1
             
+            if verbose:
+                logger.log(f"Early stopping triggered at epoch {epoch+1} (patience: {early_stopping_patience})")
             print(f'Early stopping at epoch {epoch+1}')
             break
     
     # Load best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+        if verbose:
+            logger.log("Loaded best model weights")
     
     total_time = time.time() - start_time
+    if verbose:
+        logger.log(f"Training completed in {total_time/60:.2f} minutes")
     print(f'Training completed in {total_time/60:.2f} minutes')
     
     # Log final training summary to Neptune
