@@ -14,6 +14,7 @@ from model_train import setup_training, train_model
 from utils import save_model_and_results, plot_training_curves, plot_confusion_matrix, plot_roc_curve
 from utils import save_predictions_to_csv
 from neptune_utils import log_figure, log_model
+from dense_mil_model import create_dense_model
 
 
 def run_cross_validation(args, folds, max_patches, class_weights, device='cuda', neptune_run=None):
@@ -115,6 +116,24 @@ def run_cross_validation(args, folds, max_patches, class_weights, device='cuda',
                 num_classes=len(class_weights),
                 max_patches=max_patches,
                 num_groups=args.num_groups,
+                device=device
+            )
+        # In the run_cross_validation function, add the dense model case to the model creation section
+        elif args.model_type == 'dense':
+            # Parse hidden_dims from string to list of integers
+            hidden_dims = [int(dim) for dim in args.hidden_dims.split(',')]
+            
+            model = create_dense_model(
+                feature_dim=args.feature_dim,
+                hidden_dims=hidden_dims,
+                dropout=args.dropout,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                num_groups=args.num_groups,
+                use_top_k=args.top_k,
+                batch_norm=not args.no_batch_norm,
+                residual=not args.no_residual,
+                activation=args.activation,
                 device=device
             )
         

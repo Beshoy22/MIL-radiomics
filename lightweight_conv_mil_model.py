@@ -9,7 +9,7 @@ class EfficientPatchAttention(nn.Module):
     Uses a simple linear projection followed by softmax to generate attention weights.
     """
     
-    def __init__(self, feature_dim, hidden_dim=32):
+    def __init__(self, feature_dim, hidden_dim=64):
         super(EfficientPatchAttention, self).__init__()
         
         # Simple projection to generate attention scores

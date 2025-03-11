@@ -464,5 +464,11 @@ def get_default_param_grid(model_type):
     elif model_type == 'lightweight_conv':
         param_grid['num_groups'] = [5, 10, 20]
         param_grid['num_blocks'] = [1, 2, 3]
+    elif model_type == 'dense':
+        param_grid['hidden_dims'] = ['64,32', '128,64', '256,128,64']
+        param_grid['batch_norm'] = [True, False]  # Will be passed as not args.no_batch_norm
+        param_grid['residual'] = [True, False]    # Will be passed as not args.no_residual
+        param_grid['activation'] = ['relu', 'gelu']
+        param_grid['num_groups'] = [5, 10, 20]
     
     return param_grid

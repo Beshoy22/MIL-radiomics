@@ -18,6 +18,7 @@ from cross_val_training import run_cross_validation
 from metrics_with_ci import evaluate_model_with_ci, plot_metrics_with_ci
 from neptune_utils import init_neptune_run, log_model
 from center_evaluation import evaluate_by_center, plot_center_metrics
+from dense_mil_model import create_dense_model
 
 
 def main(args):
@@ -208,6 +209,28 @@ def main(args):
             )
             print(f"Lightweight convolutional model ready" + 
                 f" (with {'top-k selection' if args.top_k else 'group aggregation'})")
+        # Add to the model creation section (in the else-if chain after lightweight_conv)
+        elif args.model_type == 'dense':
+            # Parse hidden_dims from string to list of integers
+            hidden_dims = [int(dim) for dim in args.hidden_dims.split(',')]
+            
+            model = create_dense_model(
+                feature_dim=args.feature_dim,
+                hidden_dims=hidden_dims,
+                dropout=args.dropout,
+                num_classes=len(class_weights),
+                max_patches=max_patches,
+                num_groups=args.num_groups,
+                use_top_k=args.top_k,
+                batch_norm=not args.no_batch_norm,
+                residual=not args.no_residual,
+                activation=args.activation,
+                device=device
+            )
+            print(f"Dense model ready" + 
+                f" (with {'top-k selection' if args.top_k else 'group aggregation'}, " +
+                f"{'without' if args.no_batch_norm else 'with'} batch norm, " +
+                f"{'without' if args.no_residual else 'with'} residual connections)")
         else:
             raise ValueError(f"Unsupported model type: {args.model_type}")
         
@@ -326,10 +349,10 @@ if __name__ == "__main__":
     parser.add_argument('--verbose', action='store_true', 
                         help='Enable verbose output with detailed information for debugging')
     
-    # Model type
+    # Add to argparse model_type choices (in the parser.add_argument section)
     parser.add_argument('--model_type', type=str, default='transformer', 
-                        choices=['transformer', 'lstm', 'conv', 'lightweight_conv'], 
-                        help='Type of model to train')
+                    choices=['transformer', 'lstm', 'conv', 'lightweight_conv', 'dense'], 
+                    help='Type of model to train')
     
     # Data arguments
     parser.add_argument('--data_dir', type=str, required=True, help='Directory containing .pkl files')
@@ -373,6 +396,18 @@ if __name__ == "__main__":
                         help='Number of convolutional blocks (for conv and lightweight_conv models)')
     parser.add_argument('--top-k', action='store_true', 
                         help='Use top-k patch selection for conv and lightweight_conv models')
+    
+    # Add Dense model specific arguments (add after other model-specific arguments)
+    # Dense-specific arguments
+    parser.add_argument('--hidden_dims', type=str, default='256,128,64',
+                    help='Comma-separated list of hidden dimensions for dense layers (dense model only)')
+    parser.add_argument('--no_batch_norm', action='store_true',
+                    help='Disable batch normalization in dense model')
+    parser.add_argument('--no_residual', action='store_true',
+                    help='Disable residual connections in dense model')
+    parser.add_argument('--activation', type=str, default='relu',
+                    choices=['relu', 'gelu', 'leaky_relu', 'tanh'],
+                    help='Activation function for dense model')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
