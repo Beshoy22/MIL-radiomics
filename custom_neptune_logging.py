@@ -11,6 +11,7 @@ from sklearn.metrics import roc_curve, precision_recall_curve, auc
 from sklearn.manifold import TSNE
 import seaborn as sns
 from neptune_utils import log_figure
+import matplotlib.pyplot as plt
 
 
 def log_feature_importance(neptune_run, model, input_size=512, n_features=20):

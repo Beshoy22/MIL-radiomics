@@ -7,6 +7,7 @@ from sklearn.metrics import (
 )
 from io import BytesIO
 from verbose_utils import logger
+import time
 
 def predict(model, dataloader, return_attention=False, 
            device='cuda' if torch.cuda.is_available() else 'cpu',
