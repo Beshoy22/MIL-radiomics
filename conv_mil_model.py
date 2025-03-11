@@ -50,6 +50,38 @@ class PatchAttention(nn.Module):
         return attn_weights
 
 
+class ConvBlock(nn.Module):
+    """
+    A simple convolutional block with batch normalization and residual connection.
+    """
+    
+    def __init__(self, in_channels, out_channels, kernel_size=3, dropout=0.2):
+        super(ConvBlock, self).__init__()
+        
+        self.conv = nn.Conv1d(
+            in_channels, 
+            out_channels,
+            kernel_size=kernel_size,
+            padding=kernel_size//2
+        )
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.dropout = nn.Dropout(dropout)
+        
+        # Projection for residual connection if dimensions don't match
+        self.residual_proj = nn.Identity()
+        if in_channels != out_channels:
+            self.residual_proj = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+    
+    def forward(self, x):
+        residual = self.residual_proj(x)
+        x = self.conv(x)
+        x = self.bn(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = x + residual
+        return x
+
+
 class MIL_Conv(nn.Module):
     """
     Convolutional Multiple Instance Learning model with patch-level attention.
@@ -61,36 +93,45 @@ class MIL_Conv(nn.Module):
     """
     
     def __init__(self, feature_dim=512, hidden_dim=128, 
-                 dropout=0.3, num_classes=2, max_patches=300, num_groups=10):
+                 dropout=0.3, num_classes=2, max_patches=300, 
+                 num_groups=10, num_blocks=2, use_top_k=False):
         super(MIL_Conv, self).__init__()
         
         self.feature_dim = feature_dim
         self.max_patches = max_patches
         self.num_groups = num_groups
+        self.use_top_k = use_top_k
+        self.num_blocks = num_blocks
         
         # Patch attention mechanism
         self.patch_attention = PatchAttention(feature_dim, dropout=dropout)
         
-        # Convolutional networks for classification
-        self.conv_net = nn.Sequential(
-            # First conv layer
-            nn.Conv1d(num_groups, hidden_dim, kernel_size=3, padding=1),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        # Create convolutional networks using blocks
+        self.conv_blocks = nn.ModuleList()
+        
+        # First conv block
+        self.conv_blocks.append(ConvBlock(
+            in_channels=num_groups,
+            out_channels=hidden_dim,
+            kernel_size=3,
+            dropout=dropout
+        ))
+        
+        # Additional conv blocks
+        for i in range(1, num_blocks):
+            if i == 1:
+                in_channels = hidden_dim
+                out_channels = hidden_dim * 2
+            else:
+                in_channels = hidden_dim * 2 if i == 2 else hidden_dim
+                out_channels = hidden_dim
             
-            # Second conv layer
-            nn.Conv1d(hidden_dim, hidden_dim * 2, kernel_size=3, padding=1),
-            nn.BatchNorm1d(hidden_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            
-            # Third conv layer
-            nn.Conv1d(hidden_dim * 2, hidden_dim, kernel_size=3, padding=1),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
+            self.conv_blocks.append(ConvBlock(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                dropout=dropout
+            ))
         
         # Global average pooling
         self.global_pool = nn.AdaptiveAvgPool1d(1)
@@ -124,22 +165,38 @@ class MIL_Conv(nn.Module):
         # Apply attention weights to input features
         weighted_features = x * attn_weights  # [batch_size, n_patches, feature_dim]
         
-        # Group patches into groups of approximately equal size
-        patches_per_group = (n_patches + self.num_groups - 1) // self.num_groups
-        grouped_features = torch.zeros(batch_size, self.num_groups, self.feature_dim, device=x.device)
-        
-        for i in range(self.num_groups):
-            start_idx = i * patches_per_group
-            end_idx = min((i + 1) * patches_per_group, n_patches)
+        # Top-k selection or group aggregation based on setting
+        if self.use_top_k:
+            # Sort patches by attention weights
+            _, top_indices = torch.sort(attn_weights.squeeze(-1), dim=1, descending=True)
+            # Select the top k patches (where k = num_groups)
+            top_indices = top_indices[:, :self.num_groups]
             
-            if start_idx < end_idx:
-                # Sum the weighted features in this group
-                group_sum = torch.sum(weighted_features[:, start_idx:end_idx, :], dim=1)
-                grouped_features[:, i, :] = group_sum
+            # Create a new tensor with only the top k patches
+            grouped_features = torch.zeros(batch_size, self.num_groups, self.feature_dim, device=x.device)
+            
+            for i in range(batch_size):
+                # Select top k patches and apply their weights
+                for j, idx in enumerate(top_indices[i]):
+                    grouped_features[i, j] = weighted_features[i, idx]
+        else:
+            # Group patches into groups of approximately equal size
+            patches_per_group = (n_patches + self.num_groups - 1) // self.num_groups
+            grouped_features = torch.zeros(batch_size, self.num_groups, self.feature_dim, device=x.device)
+            
+            for i in range(self.num_groups):
+                start_idx = i * patches_per_group
+                end_idx = min((i + 1) * patches_per_group, n_patches)
+                
+                if start_idx < end_idx:
+                    # Sum the weighted features in this group
+                    group_sum = torch.sum(weighted_features[:, start_idx:end_idx, :], dim=1)
+                    grouped_features[:, i, :] = group_sum
         
         # Process grouped features with convolutional networks
-        # [batch_size, num_groups, feature_dim]
-        conv_output = self.conv_net(grouped_features)
+        conv_output = grouped_features
+        for block in self.conv_blocks:
+            conv_output = block(conv_output)
         
         # Apply global pooling [batch_size, hidden_dim, feature_dim] -> [batch_size, hidden_dim, 1]
         pooled = self.global_pool(conv_output).squeeze(2)  # [batch_size, hidden_dim]
@@ -154,7 +211,8 @@ class MIL_Conv(nn.Module):
 
 
 def create_conv_model(feature_dim=512, hidden_dim=128, dropout=0.3, 
-                      num_classes=2, max_patches=300, num_groups=10, device=None):
+                      num_classes=2, max_patches=300, num_groups=10, 
+                      num_blocks=2, use_top_k=False, device=None):
     """
     Create and initialize a MIL Conv model.
     
@@ -165,6 +223,8 @@ def create_conv_model(feature_dim=512, hidden_dim=128, dropout=0.3,
         num_classes (int): Number of output classes
         max_patches (int): Maximum number of patches
         num_groups (int): Number of groups for aggregation
+        num_blocks (int): Number of convolutional blocks
+        use_top_k (bool): Whether to use top-k patch selection
         device (torch.device): Device to place the model on
         
     Returns:
@@ -176,7 +236,9 @@ def create_conv_model(feature_dim=512, hidden_dim=128, dropout=0.3,
         dropout=dropout,
         num_classes=num_classes,
         max_patches=max_patches,
-        num_groups=num_groups
+        num_groups=num_groups,
+        num_blocks=num_blocks,
+        use_top_k=use_top_k
     )
     
     # Initialize weights for better training stability

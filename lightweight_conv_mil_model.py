@@ -87,12 +87,13 @@ class LightweightMIL_Conv(nn.Module):
     
     def __init__(self, feature_dim=512, hidden_dim=64, 
                  num_blocks=2, dropout=0.2, num_classes=2, 
-                 max_patches=300, num_groups=10):
+                 max_patches=300, num_groups=10, use_top_k=False):
         super(LightweightMIL_Conv, self).__init__()
         
         self.feature_dim = feature_dim
         self.max_patches = max_patches
         self.num_groups = num_groups
+        self.use_top_k = use_top_k
         
         # Dimension reduction for input features to save parameters
         self.dim_reduction = nn.Linear(feature_dim, hidden_dim)
@@ -151,18 +152,33 @@ class LightweightMIL_Conv(nn.Module):
         # Apply attention weights to input features
         weighted_features = x * attn_weights  # [batch_size, n_patches, hidden_dim]
         
-        # Group patches into groups of approximately equal size
-        patches_per_group = (n_patches + self.num_groups - 1) // self.num_groups
-        grouped_features = torch.zeros(batch_size, self.num_groups, x.size(2), device=x.device)
-        
-        for i in range(self.num_groups):
-            start_idx = i * patches_per_group
-            end_idx = min((i + 1) * patches_per_group, n_patches)
+        # Top-k selection or group aggregation based on setting
+        if self.use_top_k:
+            # Sort patches by attention weights
+            _, top_indices = torch.sort(attn_weights.squeeze(-1), dim=1, descending=True)
+            # Select the top k patches (where k = num_groups)
+            top_indices = top_indices[:, :self.num_groups]
             
-            if start_idx < end_idx:
-                # Sum the weighted features in this group
-                group_sum = torch.sum(weighted_features[:, start_idx:end_idx, :], dim=1)
-                grouped_features[:, i, :] = group_sum
+            # Create a new tensor with only the top k patches
+            grouped_features = torch.zeros(batch_size, self.num_groups, x.size(2), device=x.device)
+            
+            for i in range(batch_size):
+                # Select top k patches and apply their weights
+                for j, idx in enumerate(top_indices[i]):
+                    grouped_features[i, j] = weighted_features[i, idx]
+        else:
+            # Group patches into groups of approximately equal size
+            patches_per_group = (n_patches + self.num_groups - 1) // self.num_groups
+            grouped_features = torch.zeros(batch_size, self.num_groups, x.size(2), device=x.device)
+            
+            for i in range(self.num_groups):
+                start_idx = i * patches_per_group
+                end_idx = min((i + 1) * patches_per_group, n_patches)
+                
+                if start_idx < end_idx:
+                    # Sum the weighted features in this group
+                    group_sum = torch.sum(weighted_features[:, start_idx:end_idx, :], dim=1)
+                    grouped_features[:, i, :] = group_sum
         
         # Process through convolutional blocks
         conv_output = grouped_features
@@ -183,7 +199,7 @@ class LightweightMIL_Conv(nn.Module):
 
 def create_lightweight_conv_model(feature_dim=512, hidden_dim=64, num_blocks=2,
                                  dropout=0.2, num_classes=2, max_patches=300, 
-                                 num_groups=10, device=None):
+                                 num_groups=10, use_top_k=False, device=None):
     """
     Create and initialize a Lightweight MIL Conv model.
     
@@ -195,6 +211,7 @@ def create_lightweight_conv_model(feature_dim=512, hidden_dim=64, num_blocks=2,
         num_classes (int): Number of output classes
         max_patches (int): Maximum number of patches
         num_groups (int): Number of groups for aggregation
+        use_top_k (bool): Whether to use top-k patch selection
         device (torch.device): Device to place the model on
         
     Returns:
@@ -207,7 +224,8 @@ def create_lightweight_conv_model(feature_dim=512, hidden_dim=64, num_blocks=2,
         dropout=dropout,
         num_classes=num_classes,
         max_patches=max_patches,
-        num_groups=num_groups
+        num_groups=num_groups,
+        use_top_k=use_top_k
     )
     
     # Initialize weights for better training stability

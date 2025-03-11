@@ -187,9 +187,13 @@ def main(args):
                 num_classes=len(class_weights),
                 max_patches=max_patches,
                 num_groups=args.num_groups,
+                num_blocks=args.num_blocks,
+                use_top_k=args.top_k,
                 device=device
             )
-            print(f"Convolutional model ready")
+            print(f"Convolutional model ready" + 
+                f" (with {'top-k selection' if args.top_k else 'group aggregation'})")
+                
         elif args.model_type == 'lightweight_conv':
             model = create_lightweight_conv_model(
                 feature_dim=args.feature_dim,
@@ -199,9 +203,11 @@ def main(args):
                 num_classes=len(class_weights),
                 max_patches=max_patches,
                 num_groups=args.num_groups,
+                use_top_k=args.top_k,
                 device=device
             )
-            print(f"Lightweight convolutional model ready")
+            print(f"Lightweight convolutional model ready" + 
+                f" (with {'top-k selection' if args.top_k else 'group aggregation'})")
         else:
             raise ValueError(f"Unsupported model type: {args.model_type}")
         
@@ -364,7 +370,9 @@ if __name__ == "__main__":
     parser.add_argument('--num_groups', type=int, default=10, 
                         help='Number of groups for patch aggregation (conv models only)')
     parser.add_argument('--num_blocks', type=int, default=2,
-                        help='Number of convolutional blocks (lightweight_conv only)')
+                        help='Number of convolutional blocks (for conv and lightweight_conv models)')
+    parser.add_argument('--top-k', action='store_true', 
+                        help='Use top-k patch selection for conv and lightweight_conv models')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
