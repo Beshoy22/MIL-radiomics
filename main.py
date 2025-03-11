@@ -36,7 +36,7 @@ def main(args):
     verbose_logger = set_verbose_mode(args.verbose)
     
     # Configure tqdm for grid search mode
-    configure_tqdm_for_grid_search(args.is_grid_search)
+    configure_tqdm_for_grid_search(args.grid_search)
     
     # Log execution info in verbose mode
     if args.verbose:
