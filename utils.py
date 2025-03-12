@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import random
 import numpy as np
 import torch
@@ -118,6 +119,15 @@ def save_model_and_results(model, metrics, history, output_dir, center_metrics=N
             metrics_json[k] = float(v)
         else:
             metrics_json[k] = v
+    
+    # Add metadata about metrics
+    metrics_json['metadata'] = {
+        'datasets': list(metrics['all_datasets'].keys()) if 'all_datasets' in metrics else ['test'],
+        'has_confidence_intervals': any(k.endswith('_ci') for k in metrics_json.keys()) or 
+                                   any(any(k.endswith('_ci') for k in dataset.keys()) 
+                                      for dataset in metrics_json.values() if isinstance(dataset, dict)),
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
     
     with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
         json.dump(metrics_json, f, indent=2)

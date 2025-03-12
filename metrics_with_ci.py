@@ -182,7 +182,7 @@ def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confiden
 
 
 def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, confidence=0.95, 
-                          neptune_run=None, verbose=False):
+                          neptune_run=None, verbose=False, dataset_name='test'):
     """
     Evaluate model with confidence intervals for all metrics.
     
@@ -194,6 +194,7 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         confidence (float): Confidence level (0-1)
         neptune_run: Neptune run object for logging (optional)
         verbose (bool): Whether to print verbose debugging information
+        dataset_name (str): Name of the dataset being evaluated (default: 'test')
         
     Returns:
         dict: Evaluation metrics with confidence intervals
@@ -273,7 +274,7 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         auc, auc_ci = 0.5, [0.0, 1.0]
     
     # Print metrics with confidence intervals
-    print("\n===== EVALUATION METRICS WITH CONFIDENCE INTERVALS =====")
+    print(f"\n===== EVALUATION METRICS WITH CONFIDENCE INTERVALS ({dataset_name.upper()} SET) =====")
     print(f"Accuracy: {accuracy:.4f} (95% CI: {accuracy_ci[0]:.4f}-{accuracy_ci[1]:.4f})")
     print(f"Precision: {precision:.4f} (95% CI: {precision_ci[0]:.4f}-{precision_ci[1]:.4f})")
     print(f"Recall: {recall:.4f} (95% CI: {recall_ci[0]:.4f}-{recall_ci[1]:.4f})")
@@ -298,17 +299,17 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         
         # Log each metric with its confidence intervals using flattened structure
         for metric_name, metric_values in metrics_ci.items():
-            neptune_run[f"evaluation/test_{metric_name}_value"] = metric_values['value']
-            neptune_run[f"evaluation/test_{metric_name}_ci_low"] = metric_values['ci_low']
-            neptune_run[f"evaluation/test_{metric_name}_ci_high"] = metric_values['ci_high']
+            neptune_run[f"evaluation/{dataset_name}_{metric_name}_value"] = metric_values['value']
+            neptune_run[f"evaluation/{dataset_name}_{metric_name}_ci_low"] = metric_values['ci_low']
+            neptune_run[f"evaluation/{dataset_name}_{metric_name}_ci_high"] = metric_values['ci_high']
             
         # Log confusion matrix
         try:
             from neptune_utils import log_confusion_matrix
-            log_confusion_matrix(neptune_run, cm, name="test_confusion_matrix_with_ci")
+            log_confusion_matrix(neptune_run, cm, name=f"{dataset_name}_confusion_matrix_with_ci")
         except (ImportError, AttributeError):
             # Fallback to logging confusion matrix as an array
-            neptune_run["evaluation/test_confusion_matrix"] = cm.tolist()
+            neptune_run[f"evaluation/{dataset_name}_confusion_matrix"] = cm.tolist()
     
     # Return dictionary with all metrics
     return {
@@ -331,7 +332,8 @@ def evaluate_model_with_ci(model, dataloader, device='cuda', n_bootstrap=1000, c
         'all_preds': preds,
         'all_probs': probs,
         'patient_ids': patient_ids,
-        'centers': centers
+        'centers': centers,
+        'dataset_name': dataset_name  # Add dataset name to metrics
     }
 
 
@@ -370,7 +372,11 @@ def plot_metrics_with_ci(metrics, output_dir=None, neptune_run=None):
     plt.xticks(range(len(metric_keys)), [key.capitalize() for key in metric_keys])
     plt.xlabel('Metric')
     plt.ylabel('Value')
-    plt.title('Evaluation Metrics with 95% Confidence Intervals')
+    
+    # Add dataset name to title if available
+    dataset_name = metrics.get('dataset_name', 'test')
+    plt.title(f'Evaluation Metrics with 95% Confidence Intervals ({dataset_name.upper()} SET)')
+    
     plt.grid(axis='y', alpha=0.3)
     plt.ylim(0, 1.05)
     

@@ -274,7 +274,9 @@ def main(args):
             dataloader=test_loader,
             device=device,
             n_bootstrap=args.bootstrap_samples,
-            neptune_run=neptune_run
+            neptune_run=neptune_run,
+            verbose=args.verbose,
+            dataset_name='test'  # Explicitly set dataset name
         )
         
         # Save predictions to CSV
@@ -299,6 +301,17 @@ def main(args):
             neptune_run=neptune_run
         )
         
+        # Combine metrics: add confidence intervals to standard metrics
+        combined_metrics = standard_metrics.copy()
+        for k, v in metrics.items():
+            if k.endswith('_ci'):
+                # Add to top-level metrics for backward compatibility
+                combined_metrics[k] = v
+                # Also add to test dataset metrics in all_datasets
+                combined_metrics['all_datasets']['test'][k] = v
+                # Add source dataset information
+                combined_metrics['all_datasets']['test'][k + '_source'] = 'test'
+        
         # Center-based evaluation
         print(f"Evaluating {args.model_type} model by center...")
         center_metrics = evaluate_by_center(
@@ -318,10 +331,10 @@ def main(args):
             min_samples=args.min_center_samples
         )
         
-        # Save model and results
+        # Save model and results with combined metrics
         save_model_and_results(
             model=model,
-            metrics=metrics,
+            metrics=combined_metrics,  # Use combined metrics instead of just test metrics
             history=history,
             output_dir=args.output_dir,
             center_metrics=center_metrics
