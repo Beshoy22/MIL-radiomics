@@ -1,27 +1,36 @@
-# Multiple Instance Learning (MIL) Framework with Neptune Logging
+# Multiple Instance Learning (MIL) for Radiomics
 
 This framework provides a comprehensive solution for training and evaluating Multiple Instance Learning (MIL) models on patch-based data, with integrated Neptune.ai logging for experiment tracking.
 
 ## Features
 
 - **Multiple MIL architectures**:
-  - Transformer-based MIL
-  - LSTM-based MIL
-  - Convolutional MIL
-  - Lightweight Convolutional MIL
+  - Transformer-based MIL with multi-head attention
+  - LSTM-based MIL with optional attention mechanism
+  - Convolutional MIL with patch grouping
+  - Lightweight Convolutional MIL for resource efficiency
+  - Dense MIL with configurable layer architecture
 - **Comprehensive data handling**:
   - Automatic caching for faster loading
   - Support for pre-split datasets
   - Configurable data preprocessing
+  - Handling of complex patch feature structures
 - **Robust evaluation**:
   - Bootstrap confidence intervals
   - Cross-validation support
   - Multiple evaluation metrics
+  - Center-based performance analysis
+- **Advanced training tools**:
+  - Grid search for hyperparameter optimization
+  - Class imbalance handling via oversampling
+  - Early stopping with customizable metrics
+  - Learning rate scheduling
 - **Visualization tools**:
   - Training curves
   - Confusion matrices
   - ROC and PR curves
   - Attention visualization
+  - Center performance comparison
 - **Neptune.ai integration**:
   - Experiment tracking
   - Metric logging
@@ -32,7 +41,7 @@ This framework provides a comprehensive solution for training and evaluating Mul
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/Beshoy22/MIL-radiomics.git
+   git clone https://github.com/yourusername/mil-framework.git
    cd mil-framework
    ```
 
@@ -82,21 +91,74 @@ python main.py --data_dir /path/to/data --model_type conv --use_neptune
 
 # Lightweight Convolutional MIL
 python main.py --data_dir /path/to/data --model_type lightweight_conv --use_neptune
+
+# Dense MIL
+python main.py --data_dir /path/to/data --model_type dense --hidden_dims 256,128,64 --use_neptune
+```
+
+### Grid Search
+
+To perform hyperparameter optimization:
+
+```bash
+# Use default parameter grid
+python main.py --data_dir /path/to/data --model_type transformer --grid_search --use_neptune
+
+# Use custom parameter grid
+python main.py --data_dir /path/to/data --model_type transformer --grid_search --grid_search_config config.json --use_neptune
+
+# Create a sample grid search configuration
+python main.py --create_sample_grid_config
+```
+
+### Center-Based Evaluation
+
+To analyze model performance across different centers:
+
+```bash
+python main.py --data_dir /path/to/data --model_type transformer --min_center_samples 15 --use_neptune
 ```
 
 ### Key Arguments
 
+#### Data Arguments
 - `--data_dir`: Path to the directory containing data files
-- `--model_type`: Type of model architecture (`transformer`, `lstm`, `conv`, or `lightweight_conv`)
-- `--endpoint`: Endpoint to use for classification (`OS_6` or `OS_24` or binary class)
+- `--endpoint`: Endpoint to use for classification (`OS_6` or `OS_24`)
+- `--oversample_factor`: Factor for oversampling minority class (default: 1.0, 0 to disable)
+- `--val_size`: Proportion of data for validation (default: 0.15)
+- `--test_size`: Proportion of data for testing (default: 0.15)
+- `--splitted`: Use pre-split data files (train_set.pkl, val_set.pkl, test_set.pkl)
+
+#### Model Arguments
+- `--model_type`: Type of model architecture (`transformer`, `lstm`, `conv`, `lightweight_conv`, or `dense`)
+- `--feature_dim`: Dimension of input features (default: 512)
+- `--hidden_dim`: Hidden dimension in the model (default: 128)
+- `--num_layers`: Number of transformer/LSTM layers (default: 2)
+- `--dropout`: Dropout rate (default: 0.3)
+
+#### Model-Specific Arguments
+- Transformer: `--num_heads` (default: 4)
+- LSTM: `--bidirectional`, `--use_attention`
+- Conv/Lightweight Conv: `--num_groups` (default: 10), `--num_blocks` (default: 2), `--top-k`
+- Dense: `--hidden_dims` (comma-separated list, default: '256,128,64'), `--num_groups` (default: 10), `--top-k`, `--no_batch_norm`, `--no_residual`, `--activation`
+
+#### Training Arguments
+- `--batch_size`: Batch size (default: 32)
+- `--lr`: Learning rate (default: 1e-4)
+- `--num_epochs`: Maximum number of training epochs (default: 100)
+- `--patience`: Patience for early stopping (default: 10)
+- `--selection_metric`: Metric for model selection (`f1_macro` or `val_loss`)
+
+#### Evaluation Arguments
 - `--cv_folds`: Number of folds for cross-validation (default: 1, meaning no cross-validation)
+- `--bootstrap_samples`: Number of bootstrap samples for confidence intervals (default: 1000)
+- `--min_center_samples`: Minimum samples per center for visualization (default: 10)
+
+#### Other Arguments
 - `--use_neptune`: Enable Neptune.ai logging
 - `--output_dir`: Directory to save outputs (default: `./outputs/{model_type}`)
-- `--batch_size`: Batch size for training
-- `--lr`: Learning rate
-- `--num_epochs`: Maximum number of training epochs
-- `--patience`: Patience for early stopping
-- `--seed`: Random seed for reproducibility
+- `--seed`: Random seed for reproducibility (default: 42)
+- `--verbose`: Enable detailed logging for debugging
 
 See all available options:
 
@@ -112,11 +174,12 @@ The framework expects data in Python pickle (.pkl) files with the following stru
 - Each instance is a dictionary containing:
   - `features`: Patch embeddings (tensor or array) of shape [n_patches, feature_dim]
   - `OS_6` or `OS_24`: Binary label (0 or 1) for the endpoint
-  - Other metadata (optional)
+  - Other metadata (optional): `patient_id`, `center`
 
-# Interpreting Results and Outputs
-
-This section explains how to interpret the results generated by the MIL framework, including output files, evaluation metrics, and visualizations.
+Alternatively, you can use pre-split data with `--splitted` flag, providing:
+- `train_set.pkl`: Training data
+- `val_set.pkl`: Validation data
+- `test_set.pkl`: Test data
 
 ## Output Directory Structure
 
@@ -128,20 +191,33 @@ outputs/
     │   ├── model.pt                 # Trained model weights
     │   ├── metrics.json             # Evaluation metrics with confidence intervals
     │   ├── history.json             # Training history
-    │   ├── center_metrics.json      # Center-specific evaluation metrics (if available)
+    │   ├── center_metrics.json      # Center-specific evaluation metrics
+    │   ├── predictions.csv          # Patient-level predictions
     │   ├── training_curves.png      # Training curves plot
     │   ├── confusion_matrix.png     # Confusion matrix plot
     │   ├── roc_curve.png            # ROC curve plot
     │   ├── metrics_with_ci.png      # Metrics with confidence intervals
     │   ├── dataset_comparison.png   # Comparison of metrics across datasets
-    │   └── center_metrics.png       # Performance by center (if available)
+    │   └── center_metrics.png       # Performance by center
     │
-    └── {model_type}_cv{n}/          # Cross-validation output
-        ├── best_model.pt            # Best model weights
-        ├── cv_metrics.json          # Aggregated CV metrics
-        ├── cv_metrics.png           # CV metrics plot
-        ├── fold_1/                  # Fold 1 outputs
-        ├── fold_2/                  # Fold 2 outputs
+    ├── {model_type}_cv{n}/          # Cross-validation output
+    │   ├── best_model.pt            # Best model weights
+    │   ├── cv_metrics.json          # Aggregated CV metrics
+    │   ├── cv_metrics.png           # CV metrics plot
+    │   ├── cv_predictions.csv       # Combined predictions across folds
+    │   ├── fold_1/                  # Fold 1 outputs
+    │   ├── fold_2/                  # Fold 2 outputs
+    │   └── ...
+    │
+    └── grid_search_{timestamp}/     # Grid search output
+        ├── param_grid.json          # Parameter grid configuration
+        ├── all_results.csv          # Results for all parameter combinations
+        ├── top_k_models.csv         # Results for top-performing models
+        ├── summary_report.txt       # Detailed analysis of grid search results
+        ├── all_model_predictions.csv # Combined predictions from all models
+        ├── visualizations/          # Grid search visualizations
+        ├── combination_0001/        # Results for specific parameter combination
+        ├── combination_0002/        # Results for specific parameter combination
         └── ...
 ```
 
@@ -157,36 +233,7 @@ The `metrics.json` file contains comprehensive evaluation metrics:
 - **F1 Weighted**: Class-weighted F1 score (higher is better)
 - **AUC**: Area Under the ROC Curve (higher is better)
 
-Each metric includes its confidence interval (`_ci`), which represents the statistical uncertainty of the result.
-
-## Training History
-
-The `history.json` file tracks training progress:
-
-- **train_loss/val_loss**: Loss values for each epoch
-- **train_acc/val_acc**: Accuracy values for each epoch
-- **val_f1_macro/val_f1_weighted**: F1 scores for validation set
-
-A good model should show decreasing loss and increasing accuracy/F1 scores over time, with validation metrics closely tracking training metrics (without large gaps indicating overfitting).
-
-## Visualizations
-
-### Training Curves
-
-This plot shows how loss and metrics evolve during training:
-- **Loss curves**: Should decrease and eventually plateau
-- **Accuracy curves**: Should increase and eventually plateau
-- **F1 curves**: Should increase and eventually plateau
-
-### Confusion Matrix
-
-### ROC Curve
-
-### Metrics with Confidence Intervals
-
-### Dataset Comparison
-
-Compares model performance across training, validation, and test sets: similar performance across all sets suggests good generalization
+Each metric includes its confidence interval (`_ci`), which represents the statistical uncertainty of the result, calculated using bootstrap resampling.
 
 ## Center-Based Evaluation
 
@@ -201,9 +248,32 @@ Analyze this data to:
 - Detect potential data distribution issues
 - Assess model generalization across different data sources
 
+## Grid Search
+
+The grid search functionality allows for systematic hyperparameter optimization:
+
+1. Create a grid search configuration file:
+   ```json
+   {
+     "lr": [1e-5, 5e-5, 1e-4, 5e-4],
+     "dropout": [0.1, 0.3, 0.5],
+     "hidden_dim": [64, 128, 256]
+   }
+   ```
+
+2. Run grid search:
+   ```bash
+   python main.py --data_dir /path/to/data --model_type transformer --grid_search --grid_search_config config.json
+   ```
+
+3. Analyze results:
+   - `top_k_models.csv`: Summary of top-performing models
+   - `summary_report.txt`: Detailed analysis of grid search results
+   - `visualizations/`: Visualizations of parameter effects on performance
+
 ## Neptune.ai Integration
 
-Neptune.ai is used for experiment tracking and visualization. When enabled with `--use_neptune`, the framework will log:
+When enabled with `--use_neptune`, the framework logs:
 
 - Model parameters and hyperparameters
 - Training and validation metrics (loss, accuracy, F1 scores)
@@ -212,9 +282,60 @@ Neptune.ai is used for experiment tracking and visualization. When enabled with 
 - Evaluation metrics with confidence intervals
 - Visualizations (training curves, confusion matrices, ROC curves)
 - Cross-validation results
+- Center-based performance metrics
 
 Access the Neptune dashboard to view and compare experiments.
 
-# Contributing
+## Advanced Model Configuration
+
+### Dense MIL Model
+
+The Dense MIL model offers high flexibility with configurable architecture and patch processing:
+
+```bash
+python main.py --data_dir /path/to/data --model_type dense \
+  --hidden_dims 256,128,64 \
+  --activation gelu \
+  --dropout 0.3 \
+  --num_groups 15 \
+  --top-k
+```
+
+- `--hidden_dims`: Comma-separated list of hidden dimensions
+- `--activation`: Activation function (relu, gelu, leaky_relu, tanh)
+- `--no_batch_norm`: Disable batch normalization
+- `--no_residual`: Disable residual connections
+- `--num_groups`: Number of patch groups for aggregation
+- `--top-k`: Use top-k attention-weighted patches instead of group aggregation
+
+The `--num_groups` parameter determines how patches are grouped, while `--top-k` enables selecting the most informative patches based on attention weights. These options can significantly affect model performance depending on your data characteristics.
+
+### LSTM MIL Model
+
+Control the LSTM behavior with options:
+
+```bash
+python main.py --data_dir /path/to/data --model_type lstm \
+  --bidirectional \
+  --use_attention \
+  --num_layers 2
+```
+
+### Convolutional MIL Models
+
+Configure patch processing strategy:
+
+```bash
+python main.py --data_dir /path/to/data --model_type conv \
+  --num_groups 15 \
+  --top-k \
+  --num_blocks 3
+```
+
+- `--num_groups`: Number of patch groups for aggregation
+- `--top-k`: Use top-k attention-weighted patches
+- `--num_blocks`: Number of convolutional blocks
+
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
