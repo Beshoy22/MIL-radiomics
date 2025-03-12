@@ -40,14 +40,15 @@ def compute_data_dir_checksum(data_dir):
     return checksum
 
 
-def process_pkl_file(pkl_file, endpoint):
+def process_pkl_file(pkl_file, endpoint, feature_dim=512):
     """
     Process a single .pkl file and extract instances with the specified endpoint.
-    Handles feature structure where features can be a list of tensors.
+    Handles feature structures where features can be a list of tensors or multi-dimensional.
     
     Args:
         pkl_file (str): Path to the .pkl file
         endpoint (str): Which endpoint to use
+        feature_dim (int): Expected dimension of features (default: 512)
         
     Returns:
         tuple: (max_patches, instances)
@@ -65,10 +66,12 @@ def process_pkl_file(pkl_file, endpoint):
                 if endpoint not in instance:
                     continue
                 
-                # Get features - these can be a list of tensors
+                # Get features - these can be a list of tensors or multi-dimensional
                 features = instance['features']
                 
                 # Handle different feature formats
+                processed_features = None
+                
                 if isinstance(features, list):
                     # List of patch embeddings
                     patch_count = len(features)
@@ -77,27 +80,39 @@ def process_pkl_file(pkl_file, endpoint):
                     if patch_count > 0:
                         # Check the type of the first patch
                         if isinstance(features[0], torch.Tensor):
-                            # If the patches are already tensors, stack them
+                            # Handle list of tensors
                             try:
+                                # Try direct stacking first
                                 processed_features = torch.stack(features)
                             except:
-                                # If tensors have different shapes, try to convert each to same shape
+                                # If tensors have different shapes, normalize them
                                 norm_features = []
                                 for feature in features:
-                                    # Ensure each feature has shape [512] or convert it
-                                    if feature.dim() == 1 and feature.shape[0] == 512:
-                                        norm_features.append(feature)
-                                    elif feature.dim() == 2:
-                                        # If it's 2D, take the first dimension if it's 512
-                                        if feature.shape[0] == 512:
-                                            norm_features.append(feature[0])
-                                        elif feature.shape[1] == 512:
-                                            norm_features.append(feature[0])
-                                        else:
-                                            # Skip this patch if we can't handle it
+                                    # Handle multi-dimensional tensors
+                                    if feature.dim() > 1:
+                                        # Try to reshape to feature_dim
+                                        try:
+                                            flattened = feature.reshape(-1)
+                                            # Take first feature_dim elements or pad
+                                            if flattened.size(0) >= feature_dim:
+                                                norm_features.append(flattened[:feature_dim])
+                                            else:
+                                                padded = torch.zeros(feature_dim, dtype=torch.float32)
+                                                padded[:flattened.size(0)] = flattened
+                                                norm_features.append(padded)
+                                        except:
+                                            # Skip patches we can't process
                                             continue
+                                    elif feature.dim() == 1:
+                                        # For 1D vectors, ensure they're feature_dim
+                                        if feature.shape[0] >= feature_dim:
+                                            norm_features.append(feature[:feature_dim])
+                                        else:
+                                            padded = torch.zeros(feature_dim, dtype=torch.float32)
+                                            padded[:feature.shape[0]] = feature
+                                            norm_features.append(padded)
                                     else:
-                                        # Skip this patch if we can't handle it
+                                        # Skip empty tensors
                                         continue
                                 
                                 if norm_features:
@@ -105,20 +120,41 @@ def process_pkl_file(pkl_file, endpoint):
                                 else:
                                     # Skip this instance if no valid patches
                                     continue
+                                    
                         elif isinstance(features[0], np.ndarray):
-                            # If the patches are numpy arrays, convert to tensors and stack
+                            # Handle list of numpy arrays
                             try:
+                                # Try direct stacking first
                                 processed_features = torch.tensor(np.stack(features), dtype=torch.float32)
                             except:
-                                # Handle different shaped arrays
+                                # If arrays have different shapes, normalize them
                                 norm_features = []
                                 for feature in features:
-                                    if feature.shape == (512,) or feature.shape == (1, 512):
-                                        norm_features.append(feature.reshape(512))
-                                    elif feature.shape == (512, 1):
-                                        norm_features.append(feature.reshape(512))
+                                    # Handle multi-dimensional arrays
+                                    if feature.ndim > 1:
+                                        # Try to reshape to feature_dim
+                                        try:
+                                            flattened = feature.reshape(-1)
+                                            # Take first feature_dim elements or pad
+                                            if flattened.shape[0] >= feature_dim:
+                                                norm_features.append(flattened[:feature_dim])
+                                            else:
+                                                padded = np.zeros(feature_dim, dtype=np.float32)
+                                                padded[:flattened.shape[0]] = flattened
+                                                norm_features.append(padded)
+                                        except:
+                                            # Skip patches we can't process
+                                            continue
+                                    elif feature.ndim == 1:
+                                        # For 1D vectors, ensure they're feature_dim
+                                        if feature.shape[0] >= feature_dim:
+                                            norm_features.append(feature[:feature_dim])
+                                        else:
+                                            padded = np.zeros(feature_dim, dtype=np.float32)
+                                            padded[:feature.shape[0]] = feature
+                                            norm_features.append(padded)
                                     else:
-                                        # Skip this patch if we can't handle it
+                                        # Skip empty arrays
                                         continue
                                 
                                 if norm_features:
@@ -129,32 +165,175 @@ def process_pkl_file(pkl_file, endpoint):
                         else:
                             # Handle other types (e.g., lists of lists)
                             try:
-                                # Try to convert to numpy array and then tensor
-                                processed_features = torch.tensor(np.array(features), dtype=torch.float32)
+                                raw_array = np.array(features)
+                                # If it's already structured as [n_patches, feature_dim]
+                                if raw_array.ndim == 2 and raw_array.shape[1] == feature_dim:
+                                    processed_features = torch.tensor(raw_array, dtype=torch.float32)
+                                else:
+                                    # Try to reshape assuming each sub-list is a flat vector
+                                    processed_features = torch.tensor(np.array(features), dtype=torch.float32)
+                                    # Ensure correct shape
+                                    if processed_features.dim() > 1:
+                                        # If multi-dimensional, flatten to patches
+                                        processed_features = processed_features.reshape(-1, processed_features.shape[-1])
+                                        # If feature dim doesn't match, try to adapt
+                                        if processed_features.shape[1] != feature_dim:
+                                            # Transpose if possible
+                                            if processed_features.shape[1] > feature_dim and processed_features.shape[0] == feature_dim:
+                                                processed_features = processed_features.transpose(0, 1)
+                                    elif processed_features.dim() == 1:
+                                        # Single vector, make it a single patch
+                                        processed_features = processed_features.reshape(1, -1)
                             except:
                                 print(f"Warning: Could not process features in {pkl_file}")
                                 continue
                     else:
                         # Skip instances with no patches
                         continue
+                        
                 elif isinstance(features, torch.Tensor):
-                    # Already a tensor, just ensure correct shape
-                    processed_features = features
+                    # Handle tensor directly
                     
-                    # Transpose if in [feature_dim, n_patches] format
-                    if processed_features.dim() == 2 and processed_features.shape[0] == 512:
-                        processed_features = processed_features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                    # Handle multi-dimensional tensors
+                    if features.dim() > 2:
+                        # Collapse all dimensions except the last one (assuming it's the feature dimension)
+                        if features.shape[-1] == feature_dim:
+                            # Last dimension is feature_dim, reshape to [n_patches, feature_dim]
+                            processed_features = features.reshape(-1, feature_dim)
+                        else:
+                            # Try to identify the feature dimension
+                            feature_dim_idx = None
+                            for i, dim_size in enumerate(features.shape):
+                                if dim_size == feature_dim:
+                                    feature_dim_idx = i
+                                    break
+                            
+                            if feature_dim_idx is not None:
+                                # Found feature dimension, reshape to move it to the end
+                                # Create permutation to move feature dimension to the end
+                                permutation = list(range(features.dim()))
+                                permutation.remove(feature_dim_idx)
+                                permutation.append(feature_dim_idx)
+                                # Permute and reshape
+                                permuted = features.permute(*permutation)
+                                processed_features = permuted.reshape(-1, feature_dim)
+                            else:
+                                # No feature dimension found, reshape all dimensions
+                                # Assuming the last dimension is features
+                                processed_features = features.reshape(-1, features.shape[-1])
+                                # If still doesn't match feature_dim, we might need to transpose
+                                if processed_features.shape[1] != feature_dim and processed_features.shape[0] == feature_dim:
+                                    processed_features = processed_features.transpose(0, 1)
+                    
+                    elif features.dim() == 2:
+                        # Already 2D, check if dimensions need transposing
+                        if features.shape[0] == feature_dim and features.shape[1] != feature_dim:
+                            # If in [feature_dim, n_patches] format, transpose
+                            processed_features = features.transpose(0, 1)
+                        else:
+                            # Already in [n_patches, feature_dim] format or other 2D shape
+                            processed_features = features
+                            
+                    elif features.dim() == 1:
+                        # 1D tensor, treat as a single patch
+                        processed_features = features.unsqueeze(0)
+                    
                 elif isinstance(features, np.ndarray):
-                    # Convert numpy array to tensor
-                    processed_features = torch.tensor(features, dtype=torch.float32)
+                    # Handle numpy array directly
                     
-                    # Transpose if in [feature_dim, n_patches] format
-                    if processed_features.dim() == 2 and processed_features.shape[0] == 512:
-                        processed_features = processed_features.transpose(0, 1)  # Now [n_patches, feature_dim]
+                    # Handle multi-dimensional arrays
+                    if features.ndim > 2:
+                        # Collapse all dimensions except the last one (assuming it's the feature dimension)
+                        if features.shape[-1] == feature_dim:
+                            # Last dimension is feature_dim, reshape to [n_patches, feature_dim]
+                            processed_features = torch.tensor(features.reshape(-1, feature_dim), dtype=torch.float32)
+                        else:
+                            # Try to identify the feature dimension
+                            feature_dim_idx = None
+                            for i, dim_size in enumerate(features.shape):
+                                if dim_size == feature_dim:
+                                    feature_dim_idx = i
+                                    break
+                            
+                            if feature_dim_idx is not None:
+                                # Found feature dimension, reshape to move it to the end
+                                # Create permutation to move feature dimension to the end
+                                permutation = list(range(features.ndim))
+                                permutation.remove(feature_dim_idx)
+                                permutation.append(feature_dim_idx)
+                                # Permute and reshape
+                                permuted = np.transpose(features, permutation)
+                                processed_features = torch.tensor(permuted.reshape(-1, feature_dim), dtype=torch.float32)
+                            else:
+                                # No feature dimension found, reshape all dimensions
+                                # Assuming the last dimension is features
+                                reshaped = features.reshape(-1, features.shape[-1])
+                                processed_features = torch.tensor(reshaped, dtype=torch.float32)
+                                # If still doesn't match feature_dim, we might need to transpose
+                                if processed_features.shape[1] != feature_dim and processed_features.shape[0] == feature_dim:
+                                    processed_features = processed_features.transpose(0, 1)
+                    
+                    elif features.ndim == 2:
+                        # Already 2D, check if dimensions need transposing
+                        if features.shape[0] == feature_dim and features.shape[1] != feature_dim:
+                            # If in [feature_dim, n_patches] format, transpose
+                            processed_features = torch.tensor(features.transpose(), dtype=torch.float32)
+                        else:
+                            # Already in [n_patches, feature_dim] format or other 2D shape
+                            processed_features = torch.tensor(features, dtype=torch.float32)
+                            
+                    elif features.ndim == 1:
+                        # 1D array, treat as a single patch
+                        processed_features = torch.tensor(features, dtype=torch.float32).unsqueeze(0)
+                
                 else:
                     # Skip instances with unsupported feature types
                     print(f"Warning: Unsupported feature type {type(features)} in {pkl_file}")
                     continue
+                
+                # Final check on processed features to ensure it has the right dimensions
+                if processed_features is None:
+                    # Skip if processing failed
+                    continue
+                
+                # Convert to float for consistency
+                processed_features = processed_features.float()
+                
+                # Make final adjustment to ensure [n_patches, feature_dim] format
+                if processed_features.dim() == 2:
+                    if processed_features.shape[1] != feature_dim and processed_features.shape[0] == feature_dim:
+                        # If in [feature_dim, n_patches] format, transpose
+                        processed_features = processed_features.transpose(0, 1)
+                    
+                    # If still doesn't match expected feature dimension after all our efforts,
+                    # we need to either skip or adapt
+                    if processed_features.shape[1] != feature_dim:
+                        # Check if we can pad/truncate
+                        if processed_features.shape[1] < feature_dim:
+                            # Pad with zeros
+                            padded = torch.zeros(processed_features.shape[0], feature_dim, dtype=torch.float32)
+                            padded[:, :processed_features.shape[1]] = processed_features
+                            processed_features = padded
+                        else:
+                            # Truncate to feature_dim
+                            processed_features = processed_features[:, :feature_dim]
+                
+                elif processed_features.dim() == 1:
+                    # If 1D, reshape to a single patch
+                    if processed_features.shape[0] < feature_dim:
+                        # Pad with zeros
+                        padded = torch.zeros(feature_dim, dtype=torch.float32)
+                        padded[:processed_features.shape[0]] = processed_features
+                        processed_features = padded.unsqueeze(0)
+                    else:
+                        # Truncate and reshape
+                        processed_features = processed_features[:feature_dim].unsqueeze(0)
+                        
+                elif processed_features.dim() > 2:
+                    # If still multi-dimensional after all processing, reshape directly
+                    processed_features = processed_features.reshape(-1, feature_dim)
+                    
+                # At this point, processed_features should be in [n_patches, feature_dim] format
                 
                 # Update max_patches
                 n_patches = processed_features.shape[0]
@@ -187,16 +366,18 @@ def process_pkl_file(pkl_file, endpoint):
 class CachedDataset(Dataset):
     """Dataset that works with pre-processed and cached data"""
     
-    def __init__(self, data, transform=None, max_patches=300):
+    def __init__(self, data, transform=None, max_patches=300, feature_dim=512):
         """
         Args:
             data (list): List of pre-processed instances
             transform (callable, optional): Optional transform to be applied on features
             max_patches (int): Maximum number of patches for padding
+            feature_dim (int): Expected dimension of features
         """
         self.data = data
         self.transform = transform
         self.max_patches = max_patches
+        self.feature_dim = feature_dim
     
     def __len__(self):
         return len(self.data)
@@ -225,38 +406,84 @@ class CachedDataset(Dataset):
                 except Exception as e:
                     print(f"Error converting features to tensor at idx {idx}: {e}")
                     # Provide a dummy tensor as fallback
-                    features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+                    features = torch.zeros((self.max_patches, self.feature_dim), dtype=torch.float32)
             
             # Ensure correct data type
             features = features.float()
             
-            # Ensure [n_patches, feature_dim] format
-            if features.dim() == 2 and features.shape[1] != 512 and features.shape[0] == 512:
-                features = features.transpose(0, 1)  # Transpose to [n_patches, feature_dim]
+            # Handle multi-dimensional tensors - collapse to [n_patches, feature_dim]
+            if features.dim() > 2:
+                # Check if last dimension is feature_dim
+                if features.shape[-1] == self.feature_dim:
+                    # Reshape to [n_patches, feature_dim]
+                    features = features.reshape(-1, self.feature_dim)
+                else:
+                    # Try to identify the feature dimension
+                    feature_dim_idx = None
+                    for i, dim_size in enumerate(features.shape):
+                        if dim_size == self.feature_dim:
+                            feature_dim_idx = i
+                            break
+                    
+                    if feature_dim_idx is not None:
+                        # Found feature dimension, reshape to move it to the end
+                        # Create permutation to move feature dimension to the end
+                        permutation = list(range(features.dim()))
+                        permutation.remove(feature_dim_idx)
+                        permutation.append(feature_dim_idx)
+                        # Permute and reshape
+                        permuted = features.permute(*permutation)
+                        features = permuted.reshape(-1, self.feature_dim)
+                    else:
+                        # No feature dimension found, reshape assuming last dim is features
+                        features = features.reshape(-1, features.shape[-1])
+                        # If feature dimension doesn't match expected, adapt
+                        if features.shape[1] != self.feature_dim:
+                            if features.shape[1] < self.feature_dim:
+                                # Pad with zeros
+                                padded = torch.zeros(features.shape[0], self.feature_dim, dtype=torch.float32)
+                                padded[:, :features.shape[1]] = features
+                                features = padded
+                            else:
+                                # Truncate
+                                features = features[:, :self.feature_dim]
             
-            # Handle case where features might be 1D or have unexpected shape
-            if features.dim() == 1:
-                if features.shape[0] == 512:
-                    # If it's a single 512-dim vector, make it a single patch
+            # Ensure [n_patches, feature_dim] format
+            if features.dim() == 2:
+                if features.shape[1] != self.feature_dim and features.shape[0] == self.feature_dim:
+                    # If in [feature_dim, n_patches] format, transpose
+                    features = features.transpose(0, 1)
+                
+                # Final check to ensure correct feature dimension
+                if features.shape[1] != self.feature_dim:
+                    if features.shape[1] < self.feature_dim:
+                        # Pad with zeros
+                        padded = torch.zeros(features.shape[0], self.feature_dim, dtype=torch.float32)
+                        padded[:, :features.shape[1]] = features
+                        features = padded
+                    else:
+                        # Truncate
+                        features = features[:, :self.feature_dim]
+            
+            # Handle case where features might be 1D
+            elif features.dim() == 1:
+                if features.shape[0] == self.feature_dim:
+                    # If it's a single feature_dim vector, make it a single patch
                     features = features.unsqueeze(0)
+                elif features.shape[0] < self.feature_dim:
+                    # Pad with zeros
+                    padded = torch.zeros(self.feature_dim, dtype=torch.float32)
+                    padded[:features.shape[0]] = features
+                    features = padded.unsqueeze(0)
                 else:
-                    # If it's not 512-dim, create dummy
-                    features = torch.zeros((1, 512), dtype=torch.float32)
-            elif features.dim() > 2:
-                # For higher dimensions, try to reshape intelligently
-                if features.shape[-1] == 512:
-                    # If the last dimension is 512, reshape to [n, 512]
-                    features = features.reshape(-1, 512)
-                else:
-                    # Otherwise, create a dummy tensor
-                    print(f"Warning: Unexpected feature dimension {features.shape} at idx {idx}")
-                    features = torch.zeros((1, 512), dtype=torch.float32)
+                    # Reshape to multiple patches if larger than feature_dim
+                    features = features.reshape(-1, self.feature_dim)
             
             # Pad or truncate the features to max_patches
             n_patches = features.shape[0]
             if n_patches < self.max_patches:
                 # Pad with zeros if fewer patches than max_patches
-                padding = torch.zeros(self.max_patches - n_patches, 512, 
+                padding = torch.zeros(self.max_patches - n_patches, self.feature_dim, 
                                     dtype=features.dtype, device=features.device)
                 features = torch.cat([features, padding], dim=0)
             elif n_patches > self.max_patches:
@@ -276,13 +503,248 @@ class CachedDataset(Dataset):
         except Exception as e:
             print(f"Error in __getitem__ at idx {idx}: {e}")
             # Return a dummy sample in case of error
-            dummy_features = torch.zeros((self.max_patches, 512), dtype=torch.float32)
+            dummy_features = torch.zeros((self.max_patches, self.feature_dim), dtype=torch.float32)
             dummy_label = torch.tensor(0, dtype=torch.long)
             dummy_identifiers = {'patient_id': f"error_{idx}", 'center': 'error'}
             return dummy_features, dummy_label, dummy_identifiers
 
 
-def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.15, seed=42, cache_dir=None):
+def create_weighted_sampler(labels, oversample_factor=1.0):
+    """
+    Create a weighted random sampler for oversampling the minority class.
+    
+    Args:
+        labels (list or array): Class labels
+        oversample_factor (float): Factor to multiply minority class weight
+                                 (1.0 means balanced, >1.0 means more minority samples)
+                                 (0.0 means no oversampling - use uniform sampling)
+    
+    Returns:
+        WeightedRandomSampler or None: Sampler for DataLoader, None if no oversampling
+    """
+    # If oversample_factor is 0, return None to indicate no oversampling
+    if oversample_factor == 0:
+        return None
+        
+    # Count instances per class
+    label_counts = Counter(labels)
+    
+    # Calculate weights per class (inversely proportional to class frequency)
+    n_samples = len(labels)
+    class_weights = {cls: n_samples / count for cls, count in label_counts.items()}
+    
+    # Apply oversample factor to minority class
+    if 0 in class_weights and 1 in class_weights:
+        minority_class = 0 if label_counts[0] < label_counts[1] else 1
+        class_weights[minority_class] *= oversample_factor
+    
+    # Assign weights to each sample
+    weights = [class_weights[label] for label in labels]
+    
+    # Create sampler
+    sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
+    
+    return sampler
+
+
+def collate_fn(batch):
+    """
+    Collate function that handles the new structure that includes patient identifiers.
+    
+    Args:
+        batch (list): List of (features, label, identifiers) tuples
+        
+    Returns:
+        torch.Tensor: Batched features
+        torch.Tensor: Batched labels
+        dict: Dictionary of identifiers lists
+    """
+    try:
+        features = []
+        labels = []
+        patient_ids = []
+        centers = []
+        
+        for i, item in enumerate(batch):
+            try:
+                # Unpack the tuple
+                if len(item) == 3:
+                    feature, label, identifier = item
+                    features.append(feature)
+                    labels.append(label)
+                    patient_ids.append(identifier.get('patient_id', f"unknown_{i}"))
+                    centers.append(identifier.get('center', 'unknown'))
+                else:
+                    # Backward compatibility with old format
+                    feature, label = item
+                    features.append(feature)
+                    labels.append(label)
+                    patient_ids.append(f"unknown_{i}")
+                    centers.append('unknown')
+            except Exception as e:
+                print(f"Error processing batch item {i}: {e}")
+                # Skip problematic items
+                continue
+        
+        if not features:
+            # Return a dummy batch if all items were problematic
+            feature_dim = getattr(batch[0][0], 'shape', [0, 512])[1] if batch else 512
+            dummy_features = torch.zeros((1, 300, feature_dim), dtype=torch.float32)  # Using default max_patches=300
+            dummy_labels = torch.zeros(1, dtype=torch.long)
+            dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
+            return dummy_features, dummy_labels, dummy_identifiers
+        
+        # All tensors should be the same size now, so we can simply stack them
+        features_tensor = torch.stack(features)
+        labels_tensor = torch.stack(labels)
+        
+        # Combine identifiers
+        identifiers = {
+            'patient_id': patient_ids,
+            'center': centers
+        }
+        
+        return features_tensor, labels_tensor, identifiers
+    except Exception as e:
+        print(f"Error in collate_fn: {e}")
+        # Return a dummy batch in case of error
+        feature_dim = getattr(batch[0][0], 'shape', [0, 512])[1] if batch else 512
+        dummy_features = torch.zeros((1, 300, feature_dim), dtype=torch.float32)  # Using default max_patches=300
+        dummy_labels = torch.zeros(1, dtype=torch.long)
+        dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
+        return dummy_features, dummy_labels, dummy_identifiers
+
+
+def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
+                        val_size=0.15, test_size=0.15, num_workers=4, seed=42,
+                        use_cache=True, cache_dir=None, splitted=False, feature_dim=512):
+    """
+    Prepare DataLoaders for training, validation, and testing with improved caching.
+    
+    Args:
+        data_dir (str): Directory containing .pkl files
+        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
+        batch_size (int): Batch size
+        oversample_factor (float): Factor for oversampling minority class (0 to disable)
+        val_size (float): Proportion of data for validation
+        test_size (float): Proportion of data for testing
+        num_workers (int): Number of workers for data loading
+        seed (int): Random seed
+        use_cache (bool): Whether to cache data in memory
+        cache_dir (str, optional): Directory to cache processed data
+        splitted (bool): Whether to use pre-split data files
+        feature_dim (int): Expected dimension of features
+    
+    Returns:
+        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics, max_patches)
+    """
+    # Create cache directory if specified and doesn't exist
+    if cache_dir and not os.path.exists(cache_dir):
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    # Handle pre-split data case
+    if splitted:
+        splits, metrics, max_patches, class_weights = load_presplit_data(
+            data_dir=data_dir,
+            endpoint=endpoint,
+            cache_dir=cache_dir,
+            feature_dim=feature_dim
+        )
+    else:
+        # Compute directory checksum to detect changes
+        dir_checksum = compute_data_dir_checksum(data_dir)
+        
+        # Cached split filename
+        cached_split_file = os.path.join(cache_dir, f"splits_{endpoint}_{val_size}_{test_size}_{seed}_{feature_dim}_{dir_checksum}.pkl") if cache_dir else None
+        
+        # Check if cached splits exist
+        if cached_split_file and os.path.exists(cached_split_file) and use_cache:
+            print(f"Loading cached splits from {cached_split_file}")
+            with open(cached_split_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                splits = cached_data['splits']
+                max_patches = cached_data['max_patches']
+                class_weights = cached_data['class_weights']
+                metrics = cached_data['metrics']
+        else:
+            # Process data and create splits
+            print(f"Processing data and creating splits (no cached splits found or cache not used)")
+            splits, metrics, max_patches, class_weights = create_cached_splits(
+                data_dir=data_dir,
+                endpoint=endpoint,
+                val_size=val_size,
+                test_size=test_size,
+                seed=seed,
+                cache_dir=cache_dir,
+                feature_dim=feature_dim
+            )
+            
+            # Cache the splits
+            if cached_split_file:
+                with open(cached_split_file, 'wb') as f:
+                    pickle.dump({
+                        'splits': splits,
+                        'max_patches': max_patches,
+                        'class_weights': class_weights,
+                        'metrics': metrics
+                    }, f)
+    
+    # Create datasets using the splits
+    train_dataset = CachedDataset(splits['train_data'], max_patches=max_patches, feature_dim=feature_dim)
+    val_dataset = CachedDataset(splits['val_data'], max_patches=max_patches, feature_dim=feature_dim)
+    test_dataset = CachedDataset(splits['test_data'], max_patches=max_patches, feature_dim=feature_dim)
+    
+    # Create weighted sampler for handling class imbalance if oversampling is enabled
+    train_sampler = None
+    if oversample_factor > 0:
+        train_sampler = create_weighted_sampler(
+            labels=[item['label'] for item in splits['train_data']],
+            oversample_factor=oversample_factor
+        )
+        shuffle = False  # Don't shuffle when using sampler
+    else:
+        shuffle = True  # Shuffle when not using sampler
+    
+    # Create data loaders with our collate_fn
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        shuffle=shuffle if train_sampler is None else False,  # Only shuffle if not using sampler
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return (
+        train_loader, 
+        val_loader, 
+        test_loader, 
+        class_weights, 
+        metrics, 
+        max_patches
+    )
+
+
+def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.15, seed=42, cache_dir=None, feature_dim=512):
     """
     Process data files individually and create stratified splits with caching.
     
@@ -293,6 +755,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
         test_size (float): Proportion of data for testing
         seed (int): Random seed
         cache_dir (str, optional): Directory to cache processed data
+        feature_dim (int): Expected dimension of features
         
     Returns:
         tuple: (splits, metrics, max_patches, class_weights)
@@ -318,7 +781,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
         file_cache_path = None
         if cache_dir:
             file_hash = hashlib.md5(os.path.basename(pkl_file).encode()).hexdigest()
-            file_cache_path = os.path.join(cache_dir, f"{file_hash}_{endpoint}.pkl")
+            file_cache_path = os.path.join(cache_dir, f"{file_hash}_{endpoint}_{feature_dim}.pkl")
             
             # Check if cached file exists
             if os.path.exists(file_cache_path):
@@ -328,7 +791,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
                     instances = file_data['instances']
             else:
                 # Process the file
-                file_max_patches, instances = process_pkl_file(pkl_file, endpoint)
+                file_max_patches, instances = process_pkl_file(pkl_file, endpoint, feature_dim=feature_dim)
                 
                 # Cache the processed data
                 with open(file_cache_path, 'wb') as f:
@@ -338,7 +801,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
                     }, f)
         else:
             # Process the file without caching
-            file_max_patches, instances = process_pkl_file(pkl_file, endpoint)
+            file_max_patches, instances = process_pkl_file(pkl_file, endpoint, feature_dim=feature_dim)
         
         # Update max_patches
         max_patches = max(max_patches, file_max_patches)
@@ -419,239 +882,7 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
     return splits, metrics, max_patches, class_weights
 
 
-def prepare_dataloaders(data_dir, endpoint='OS_6', batch_size=16, oversample_factor=1.0, 
-                        val_size=0.15, test_size=0.15, num_workers=4, seed=42,
-                        use_cache=True, cache_dir=None, splitted=False):
-    """
-    Prepare DataLoaders for training, validation, and testing with improved caching.
-    
-    Args:
-        data_dir (str): Directory containing .pkl files
-        endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
-        batch_size (int): Batch size
-        oversample_factor (float): Factor for oversampling minority class (0 to disable)
-        val_size (float): Proportion of data for validation
-        test_size (float): Proportion of data for testing
-        num_workers (int): Number of workers for data loading
-        seed (int): Random seed
-        use_cache (bool): Whether to cache data in memory
-        cache_dir (str, optional): Directory to cache processed data
-        splitted (bool): Whether to use pre-split data files
-    
-    Returns:
-        tuple: (train_loader, val_loader, test_loader, class_weights, split_metrics, max_patches)
-    """
-    # Create cache directory if specified and doesn't exist
-    if cache_dir and not os.path.exists(cache_dir):
-        os.makedirs(cache_dir, exist_ok=True)
-    
-    # Handle pre-split data case
-    if splitted:
-        splits, metrics, max_patches, class_weights = load_presplit_data(
-            data_dir=data_dir,
-            endpoint=endpoint,
-            cache_dir=cache_dir
-        )
-    else:
-        # Compute directory checksum to detect changes
-        dir_checksum = compute_data_dir_checksum(data_dir)
-        
-        # Cached split filename
-        cached_split_file = os.path.join(cache_dir, f"splits_{endpoint}_{val_size}_{test_size}_{seed}_{dir_checksum}.pkl") if cache_dir else None
-        
-        # Check if cached splits exist
-        if cached_split_file and os.path.exists(cached_split_file) and use_cache:
-            print(f"Loading cached splits from {cached_split_file}")
-            with open(cached_split_file, 'rb') as f:
-                cached_data = pickle.load(f)
-                splits = cached_data['splits']
-                max_patches = cached_data['max_patches']
-                class_weights = cached_data['class_weights']
-                metrics = cached_data['metrics']
-        else:
-            # Process data and create splits
-            print(f"Processing data and creating splits (no cached splits found or cache not used)")
-            splits, metrics, max_patches, class_weights = create_cached_splits(
-                data_dir=data_dir,
-                endpoint=endpoint,
-                val_size=val_size,
-                test_size=test_size,
-                seed=seed,
-                cache_dir=cache_dir
-            )
-            
-            # Cache the splits
-            if cached_split_file:
-                with open(cached_split_file, 'wb') as f:
-                    pickle.dump({
-                        'splits': splits,
-                        'max_patches': max_patches,
-                        'class_weights': class_weights,
-                        'metrics': metrics
-                    }, f)
-    
-    # Create datasets using the splits
-    train_dataset = CachedDataset(splits['train_data'], max_patches=max_patches)
-    val_dataset = CachedDataset(splits['val_data'], max_patches=max_patches)
-    test_dataset = CachedDataset(splits['test_data'], max_patches=max_patches)
-    
-    # Create weighted sampler for handling class imbalance if oversampling is enabled
-    train_sampler = None
-    if oversample_factor > 0:
-        train_sampler = create_weighted_sampler(
-            labels=[item['label'] for item in splits['train_data']],
-            oversample_factor=oversample_factor
-        )
-        shuffle = False  # Don't shuffle when using sampler
-    else:
-        shuffle = True  # Shuffle when not using sampler
-    
-    # Create data loaders with our collate_fn
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        shuffle=shuffle if train_sampler is None else False,  # Only shuffle if not using sampler
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    return (
-        train_loader, 
-        val_loader, 
-        test_loader, 
-        class_weights, 
-        metrics, 
-        max_patches
-    )
-
-
-# Keeping the existing functions that don't need to be changed
-def create_weighted_sampler(labels, oversample_factor=1.0):
-    """
-    Create a weighted random sampler for oversampling the minority class.
-    
-    Args:
-        labels (list or array): Class labels
-        oversample_factor (float): Factor to multiply minority class weight
-                                 (1.0 means balanced, >1.0 means more minority samples)
-                                 (0.0 means no oversampling - use uniform sampling)
-    
-    Returns:
-        WeightedRandomSampler or None: Sampler for DataLoader, None if no oversampling
-    """
-    # If oversample_factor is 0, return None to indicate no oversampling
-    if oversample_factor == 0:
-        return None
-        
-    # Count instances per class
-    label_counts = Counter(labels)
-    
-    # Calculate weights per class (inversely proportional to class frequency)
-    n_samples = len(labels)
-    class_weights = {cls: n_samples / count for cls, count in label_counts.items()}
-    
-    # Apply oversample factor to minority class
-    if 0 in class_weights and 1 in class_weights:
-        minority_class = 0 if label_counts[0] < label_counts[1] else 1
-        class_weights[minority_class] *= oversample_factor
-    
-    # Assign weights to each sample
-    weights = [class_weights[label] for label in labels]
-    
-    # Create sampler
-    sampler = WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
-    
-    return sampler
-
-
-def collate_fn(batch):
-    """
-    Collate function that handles the new structure that includes patient identifiers.
-    
-    Args:
-        batch (list): List of (features, label, identifiers) tuples
-        
-    Returns:
-        torch.Tensor: Batched features
-        torch.Tensor: Batched labels
-        dict: Dictionary of identifiers lists
-    """
-    try:
-        features = []
-        labels = []
-        patient_ids = []
-        centers = []
-        
-        for i, item in enumerate(batch):
-            try:
-                # Unpack the tuple
-                if len(item) == 3:
-                    feature, label, identifier = item
-                    features.append(feature)
-                    labels.append(label)
-                    patient_ids.append(identifier.get('patient_id', f"unknown_{i}"))
-                    centers.append(identifier.get('center', 'unknown'))
-                else:
-                    # Backward compatibility with old format
-                    feature, label = item
-                    features.append(feature)
-                    labels.append(label)
-                    patient_ids.append(f"unknown_{i}")
-                    centers.append('unknown')
-            except Exception as e:
-                print(f"Error processing batch item {i}: {e}")
-                # Skip problematic items
-                continue
-        
-        if not features:
-            # Return a dummy batch if all items were problematic
-            dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
-            dummy_labels = torch.zeros(1, dtype=torch.long)
-            dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
-            return dummy_features, dummy_labels, dummy_identifiers
-        
-        # All tensors should be the same size now, so we can simply stack them
-        features_tensor = torch.stack(features)
-        labels_tensor = torch.stack(labels)
-        
-        # Combine identifiers
-        identifiers = {
-            'patient_id': patient_ids,
-            'center': centers
-        }
-        
-        return features_tensor, labels_tensor, identifiers
-    except Exception as e:
-        print(f"Error in collate_fn: {e}")
-        # Return a dummy batch in case of error
-        dummy_features = torch.zeros((1, 300, 512), dtype=torch.float32)  # Using default max_patches=300
-        dummy_labels = torch.zeros(1, dtype=torch.long)
-        dummy_identifiers = {'patient_id': ['error'], 'center': ['error']}
-        return dummy_features, dummy_labels, dummy_identifiers
-
-
-# New function to add to dataloader.py
-def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
+def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None, feature_dim=512):
     """
     Load pre-split data from train_set.pkl, val_set.pkl, and test_set.pkl.
     
@@ -659,6 +890,7 @@ def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
         data_dir (str): Directory containing .pkl files
         endpoint (str): Which endpoint to use ('OS_6' or 'OS_24')
         cache_dir (str, optional): Directory to cache processed data
+        feature_dim (int): Expected dimension of features
         
     Returns:
         tuple: (splits, metrics, max_patches, class_weights)
@@ -675,9 +907,9 @@ def load_presplit_data(data_dir, endpoint='OS_6', cache_dir=None):
     print(f"Loading pre-split data from {data_dir}...")
     
     # Process each file
-    train_max_patches, train_data = process_pkl_file(train_file, endpoint)
-    val_max_patches, val_data = process_pkl_file(val_file, endpoint)
-    test_max_patches, test_data = process_pkl_file(test_file, endpoint)
+    train_max_patches, train_data = process_pkl_file(train_file, endpoint, feature_dim=feature_dim)
+    val_max_patches, val_data = process_pkl_file(val_file, endpoint, feature_dim=feature_dim)
+    test_max_patches, test_data = process_pkl_file(test_file, endpoint, feature_dim=feature_dim)
     
     # Calculate maximum patches across all datasets
     max_patches = max(train_max_patches, val_max_patches, test_max_patches)
