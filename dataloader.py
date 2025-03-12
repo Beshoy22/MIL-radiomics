@@ -343,8 +343,18 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                 label = instance[endpoint]  # Get the specified endpoint
                 
                 # Convert to binary if not already
-                if not isinstance(label, int):
+                if isinstance(label, bool):
                     label = 1 if label else 0
+                elif not isinstance(label, int):
+                    # Try to convert to int if it's a different type
+                    try:
+                        label = int(label)
+                    except (ValueError, TypeError):
+                        # If conversion fails, treat as binary
+                        label = 1 if label else 0
+                
+                # Ensure label is either 0 or 1
+                label = 1 if label > 0 else 0
                 
                 # Create a patient ID from center and index
                 # Try to get an existing ID from instance, if available
@@ -813,22 +823,58 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
         # Extract labels for stratification
         labels = [instance['label'] for instance in instances]
         
-        # Stratified split for this file
-        train_idx, temp_idx = train_test_split(
-            range(len(instances)),
-            test_size=val_size + test_size,
-            random_state=seed,
-            stratify=labels
-        )
+        # Check if stratification is possible (need at least 2 samples per class)
+        label_counts = Counter(labels)
+        can_stratify = all(count >= 2 for count in label_counts.values())
         
-        # Adjust validation size relative to remaining data
-        val_test_ratio = val_size / (val_size + test_size)
-        val_idx, test_idx = train_test_split(
-            temp_idx,
-            test_size=1 - val_test_ratio,
-            random_state=seed,
-            stratify=[labels[i] for i in temp_idx]
-        )
+        # Perform split with or without stratification
+        if can_stratify:
+            # Stratified split for this file
+            train_idx, temp_idx = train_test_split(
+                range(len(instances)),
+                test_size=val_size + test_size,
+                random_state=seed,
+                stratify=labels
+            )
+            
+            # Check if the second stratification is possible
+            temp_labels = [labels[i] for i in temp_idx]
+            temp_label_counts = Counter(temp_labels)
+            can_stratify_temp = all(count >= 2 for count in temp_label_counts.values())
+            
+            # Adjust validation size relative to remaining data
+            val_test_ratio = val_size / (val_size + test_size)
+            
+            if can_stratify_temp:
+                val_idx, test_idx = train_test_split(
+                    temp_idx,
+                    test_size=1 - val_test_ratio,
+                    random_state=seed,
+                    stratify=temp_labels
+                )
+            else:
+                # Fall back to non-stratified split for the second stage
+                val_idx, test_idx = train_test_split(
+                    temp_idx,
+                    test_size=1 - val_test_ratio,
+                    random_state=seed
+                )
+        else:
+            # Fall back to non-stratified split
+            print(f"Warning: File {os.path.basename(pkl_file)} has insufficient samples per class for stratification (counts: {dict(label_counts)}). Using non-stratified split.")
+            train_idx, temp_idx = train_test_split(
+                range(len(instances)),
+                test_size=val_size + test_size,
+                random_state=seed
+            )
+            
+            # Adjust validation size relative to remaining data
+            val_test_ratio = val_size / (val_size + test_size)
+            val_idx, test_idx = train_test_split(
+                temp_idx,
+                test_size=1 - val_test_ratio,
+                random_state=seed
+            )
         
         # Add instances to respective splits
         for idx in train_idx:
