@@ -160,12 +160,11 @@ class LightweightMIL_Conv(nn.Module):
             top_indices = top_indices[:, :self.num_groups]
             
             # Create a new tensor with only the top k patches
-            grouped_features = torch.zeros(batch_size, self.num_groups, x.size(2), device=x.device)
-            
-            for i in range(batch_size):
-                # Select top k patches and apply their weights
-                for j, idx in enumerate(top_indices[i]):
-                    grouped_features[i, j] = weighted_features[i, idx]
+            # Vectorized version using torch.gather - much faster than loops!
+            # Expand indices to match feature dimensions: [batch_size, num_groups, feature_dim]
+            expanded_indices = top_indices.unsqueeze(-1).expand(-1, -1, x.size(2))
+            # Gather features at the top indices
+            grouped_features = torch.gather(weighted_features, 1, expanded_indices)
         else:
             # Group patches into groups of approximately equal size
             patches_per_group = (n_patches + self.num_groups - 1) // self.num_groups
