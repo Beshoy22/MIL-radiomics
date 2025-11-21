@@ -2,12 +2,15 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, 
+    accuracy_score, precision_score, recall_score,
     f1_score, roc_auc_score, confusion_matrix
 )
 from io import BytesIO
-from verbose_utils import logger
+from verbose_utils import logger as verbose_logger
+from logger import get_logger
 import time
+
+logger = get_logger(__name__)
 
 def predict(model, dataloader, return_attention=False, 
            device='cuda' if torch.cuda.is_available() else 'cpu',
@@ -152,9 +155,10 @@ def bootstrap_metric(labels, preds, probs, metric_fn, n_bootstrap=1000, confiden
         # Calculate metric on bootstrap sample
         try:
             bootstrap_values.append(metric_fn(bootstrap_labels, bootstrap_preds, bootstrap_probs))
-        except:
-            # In case the bootstrap sample has only one class
-            bootstrap_values.append(0.0)
+        except (ValueError, RuntimeError) as e:
+            # In case the bootstrap sample has only one class or other metric computation issues
+            logger.debug(f"Bootstrap sample metric computation failed: {e}. Using 0.5 as neutral value.")
+            bootstrap_values.append(0.5)
     
     # Sort bootstrap values
     bootstrap_values = np.array(bootstrap_values)

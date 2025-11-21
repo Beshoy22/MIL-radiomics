@@ -6,11 +6,14 @@ import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, 
+    accuracy_score, precision_score, recall_score,
     f1_score, roc_auc_score, confusion_matrix
 )
 
-from verbose_utils import logger
+from verbose_utils import logger as verbose_logger
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, 
                 scheduler=None, num_epochs=100, early_stopping_patience=10,
@@ -402,8 +405,10 @@ def evaluate_model(model, test_loader, criterion=None,
         
         try:
             auc = roc_auc_score(all_labels, all_probs)
-        except:
-            auc = 0.0  # In case of only one class
+        except ValueError as e:
+            # Occurs when only one class is present in labels
+            logger.warning(f"Cannot compute AUC: {e}. Using 0.5 as neutral value.")
+            auc = 0.5  # Neutral value for single-class case
         
         cm = confusion_matrix(all_labels, all_preds)
         

@@ -11,6 +11,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
+from logger import get_logger
+from secure_pickle import safe_pickle_load, safe_pickle_dump
+
+logger = get_logger(__name__)
+
 
 def compute_data_dir_checksum(data_dir):
     """
@@ -35,8 +40,9 @@ def compute_data_dir_checksum(data_dir):
     
     # Create a string representation and hash it
     dir_info_str = json.dumps(file_info, sort_keys=True)
-    checksum = hashlib.md5(dir_info_str.encode()).hexdigest()
-    
+    # Using SHA-256 for secure integrity checking (MD5 is cryptographically broken)
+    checksum = hashlib.sha256(dir_info_str.encode()).hexdigest()
+
     return checksum
 
 
@@ -84,8 +90,9 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                             try:
                                 # Try direct stacking first
                                 processed_features = torch.stack(features)
-                            except:
+                            except (RuntimeError, ValueError, TypeError) as e:
                                 # If tensors have different shapes, normalize them
+                                logger.debug(f"Direct tensor stacking failed in {pkl_file}: {e}. Normalizing features.")
                                 norm_features = []
                                 for feature in features:
                                     # Handle multi-dimensional tensors
@@ -100,8 +107,9 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                                                 padded = torch.zeros(feature_dim, dtype=torch.float32)
                                                 padded[:flattened.size(0)] = flattened
                                                 norm_features.append(padded)
-                                        except:
+                                        except (RuntimeError, ValueError) as e:
                                             # Skip patches we can't process
+                                            logger.warning(f"Skipping patch that couldn't be reshaped: {e}")
                                             continue
                                     elif feature.dim() == 1:
                                         # For 1D vectors, ensure they're feature_dim
@@ -126,8 +134,9 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                             try:
                                 # Try direct stacking first
                                 processed_features = torch.tensor(np.stack(features), dtype=torch.float32)
-                            except:
+                            except (ValueError, RuntimeError, TypeError) as e:
                                 # If arrays have different shapes, normalize them
+                                logger.debug(f"Direct numpy stacking failed in {pkl_file}: {e}. Normalizing features.")
                                 norm_features = []
                                 for feature in features:
                                     # Handle multi-dimensional arrays
@@ -142,8 +151,9 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                                                 padded = np.zeros(feature_dim, dtype=np.float32)
                                                 padded[:flattened.shape[0]] = flattened
                                                 norm_features.append(padded)
-                                        except:
+                                        except (ValueError, RuntimeError) as e:
                                             # Skip patches we can't process
+                                            logger.warning(f"Skipping numpy patch that couldn't be reshaped: {e}")
                                             continue
                                     elif feature.ndim == 1:
                                         # For 1D vectors, ensure they're feature_dim
@@ -184,8 +194,8 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                                     elif processed_features.dim() == 1:
                                         # Single vector, make it a single patch
                                         processed_features = processed_features.reshape(1, -1)
-                            except:
-                                print(f"Warning: Could not process features in {pkl_file}")
+                            except (ValueError, RuntimeError, TypeError) as e:
+                                logger.warning(f"Could not process features in {pkl_file}: {e}")
                                 continue
                     else:
                         # Skip instances with no patches
@@ -288,7 +298,7 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                 
                 else:
                     # Skip instances with unsupported feature types
-                    print(f"Warning: Unsupported feature type {type(features)} in {pkl_file}")
+                    logger.warning(f"Unsupported feature type {type(features)} in {pkl_file}")
                     continue
                 
                 # Final check on processed features to ensure it has the right dimensions
@@ -369,7 +379,7 @@ def process_pkl_file(pkl_file, endpoint, feature_dim=512):
                 
         return max_patches, instances
     except Exception as e:
-        print(f"Error processing {pkl_file}: {e}")
+        logger.error(f"Error processing {pkl_file}: {e}", exc_info=True)
         return 0, []
 
 
@@ -414,7 +424,7 @@ class CachedDataset(Dataset):
                     else:
                         features = torch.tensor(features, dtype=torch.float32)
                 except Exception as e:
-                    print(f"Error converting features to tensor at idx {idx}: {e}")
+                    logger.error(f"Error converting features to tensor at idx {idx}: {e}", exc_info=True)
                     # Provide a dummy tensor as fallback
                     features = torch.zeros((self.max_patches, self.feature_dim), dtype=torch.float32)
             
@@ -511,7 +521,7 @@ class CachedDataset(Dataset):
             
             return features, label, identifiers
         except Exception as e:
-            print(f"Error in __getitem__ at idx {idx}: {e}")
+            logger.error(f"Error in __getitem__ at idx {idx}: {e}", exc_info=True)
             # Return a dummy sample in case of error
             dummy_features = torch.zeros((self.max_patches, self.feature_dim), dtype=torch.float32)
             dummy_label = torch.tensor(0, dtype=torch.long)
@@ -790,7 +800,8 @@ def create_cached_splits(data_dir, endpoint='OS_6', val_size=0.15, test_size=0.1
         # Create a file-specific cache if cache_dir is provided
         file_cache_path = None
         if cache_dir:
-            file_hash = hashlib.md5(os.path.basename(pkl_file).encode()).hexdigest()
+            # Using SHA-256 for secure file identification
+            file_hash = hashlib.sha256(os.path.basename(pkl_file).encode()).hexdigest()
             file_cache_path = os.path.join(cache_dir, f"{file_hash}_{endpoint}_{feature_dim}.pkl")
             
             # Check if cached file exists

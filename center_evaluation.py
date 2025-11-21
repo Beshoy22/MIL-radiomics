@@ -11,6 +11,9 @@ import os
 import json
 import pandas as pd
 from io import BytesIO
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_available() else 'cpu', 
                       neptune_run=None):
@@ -107,8 +110,10 @@ def evaluate_by_center(model, test_loader, device='cuda' if torch.cuda.is_availa
             
             try:
                 auc = roc_auc_score(center_labels, center_probs)
-            except:
-                auc = 0.0  # In case of only one class
+            except ValueError as e:
+                # Occurs when only one class is present in labels
+                logger.warning(f"Cannot compute AUC for center {center}: {e}. Using 0.5 as neutral value.")
+                auc = 0.5  # Neutral value for single-class case
                 
             cm = confusion_matrix(center_labels, center_preds)
             

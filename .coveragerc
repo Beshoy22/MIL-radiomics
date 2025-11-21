@@ -1,0 +1,70 @@
+[run]
+# Coverage.py configuration
+
+# Source code to measure
+source = .
+
+# Files to omit from coverage
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */site-packages/*
+    */venv/*
+    */env/*
+    */.venv/*
+    setup.py
+    */src/mil_radiomics/models/*
+    */src/mil_radiomics/data/*
+    */src/mil_radiomics/training/*
+    */src/mil_radiomics/evaluation/*
+    */src/mil_radiomics/utils/*
+
+[report]
+# Reporting options
+
+# Precision for coverage percentages
+precision = 2
+
+# Show missing lines
+show_missing = True
+
+# Skip covered files
+skip_covered = False
+
+# Skip empty files
+skip_empty = True
+
+# Exclude lines from coverage
+exclude_lines =
+    # Standard pragma
+    pragma: no cover
+
+    # Don't complain about missing debug code
+    def __repr__
+
+    # Don't complain if tests don't hit defensive assertion code
+    raise AssertionError
+    raise NotImplementedError
+
+    # Don't complain if non-runnable code isn't run
+    if __name__ == .__main__.:
+    if __name__ == "__main__":
+
+    # Don't complain about abstract methods
+    @abc.abstractmethod
+    @abstractmethod
+
+    # Type checking blocks
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:
+
+    # Debugging code
+    import pdb
+    pdb.set_trace()
+    breakpoint()
+
+[html]
+# HTML report options
+directory = htmlcov
+title = MIL-radiomics Coverage Report

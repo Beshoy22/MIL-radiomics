@@ -39,22 +39,64 @@ This framework provides a comprehensive solution for training and evaluating Mul
 
 ## Installation
 
+### Standard Installation
+
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/mil-framework.git
-   cd mil-framework
+   git clone https://github.com/Beshoy22/MIL-radiomics.git
+   cd MIL-radiomics
    ```
 
-2. Install the required dependencies:
+2. Install the package:
    ```bash
+   # Basic installation
    pip install -r requirements.txt
+
+   # Or install as a package (recommended)
+   pip install -e .
    ```
 
-3. Configure Neptune logging (optional):
-   - Create a `.env` file in the project root with your Neptune API key and project name:
-   ```
+### Development Installation
+
+For contributors and developers:
+
+```bash
+# Install with development dependencies
+pip install -e .
+pip install -r requirements-dev.txt
+
+# Or use the dev extras
+pip install -e ".[dev]"
+```
+
+### Testing
+
+Run the test suite to verify installation:
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage report
+pytest --cov=. --cov-report=html
+
+# Run specific test file
+pytest tests/test_dataloader.py -v
+```
+
+### Configuration
+
+1. **Neptune.ai logging** (optional):
+   Create a `.env` file in the project root with your Neptune credentials:
+   ```env
    NEPTUNE_API_KEY=your_api_key_here
    NEPTUNE_PROJECT=your_workspace/your_project_name
+   ```
+
+2. **Logging Level** (optional):
+   Set the logging verbosity:
+   ```env
+   LOG_LEVEL=DEBUG  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
    ```
 
 ## Usage

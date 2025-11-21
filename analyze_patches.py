@@ -6,6 +6,9 @@ import torch
 from tqdm import tqdm
 from collections import Counter
 import matplotlib.pyplot as plt
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def analyze_dataset(data_dir, endpoint='OS_6'):
@@ -64,9 +67,9 @@ def analyze_dataset(data_dir, endpoint='OS_6'):
                     else:
                         try:
                             n_patches = len(features)
-                        except:
+                        except TypeError as e:
                             n_patches = 0
-                            print(f"Warning: Could not determine patches for an instance in {pkl_file}")
+                            logger.warning(f"Could not determine patches for an instance in {pkl_file}: {e}")
                     
                     patch_counts.append(n_patches)
                     max_patches = max(max_patches, n_patches)

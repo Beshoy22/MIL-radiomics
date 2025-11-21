@@ -37,7 +37,8 @@ def create_cached_folds(data_dir, endpoint='OS_6', n_folds=5, seed=42, cache_dir
     folds_cache_path = None
     if cache_dir:
         # Create a hash of sorted filenames to detect changes in dataset
-        files_hash = hashlib.md5("".join(sorted([os.path.basename(f) for f in pkl_files])).encode()).hexdigest()
+        # Using SHA-256 for secure integrity checking
+        files_hash = hashlib.sha256("".join(sorted([os.path.basename(f) for f in pkl_files])).encode()).hexdigest()
         folds_cache_path = os.path.join(cache_dir, f"folds_{n_folds}_{endpoint}_{seed}_{files_hash}.pkl")
         
         if os.path.exists(folds_cache_path):
