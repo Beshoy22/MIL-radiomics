@@ -1,0 +1,806 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype}
+\usepackage{bm}
+\usepackage{mathtools}
+\usepackage{cleveref}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=green!50!black,
+    urlcolor=blue!60!black
+}
+
+\title{%
+  \Large \textbf{Multiple Instance Learning on CT Patch Embeddings\\
+  for Lung Cancer Survival Prediction}\\[0.5em]
+  \large Technical Report
+}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+Predicting overall survival (OS) from computed tomography (CT) imaging is a central
+challenge in thoracic oncology. For patients with non-small-cell lung cancer (NSCLC)
+or small-cell lung cancer (SCLC), CT scans encode rich morphological and textural
+information about the primary tumour and its surrounding tissue that is prognostically
+relevant. Classical radiomics pipelines extract hand-crafted features from
+segmentation masks and feed them into shallow classifiers; however, they discard spatial
+context outside the annotated region of interest and are sensitive to segmentation
+quality.
+
+The framework described in this report takes a different approach: it decomposes
+each CT volume into a set of three-dimensional (3-D) sub-volume patches, encodes
+every patch with a pretrained CT foundation model, and then aggregates the resulting
+bag of embeddings at the patient level using a \emph{Multiple Instance Learning}
+(MIL) classifier. This design has three key advantages:
+\begin{enumerate}
+  \item No pixel-level annotation is required; supervision is provided only at the
+        patient level (the binary survival label).
+  \item Whole-volume context is preserved, allowing the model to integrate information
+        from the tumour core, margins, and surrounding parenchyma simultaneously.
+  \item The modular architecture supports multiple aggregation strategies that can be
+        compared systematically under a common training and evaluation pipeline.
+\end{enumerate}
+
+The primary model highlighted in this report is the \textbf{LSTM-based MIL} variant.
+Patches are ordered anatomically along the superior-inferior (Z) axis before being
+fed as a temporal sequence to a bidirectional Long Short-Term Memory (LSTM) network.
+The LSTM hidden state is conceptualised as a \emph{risk accumulator}: as the network
+scans the volume from apex to base, its memory progressively integrates local patch-level
+lesion signals into a coherent, holistic representation of cumulative tumour burden.
+This narrative motivates the architectural choices described in
+\cref{sec:lstm}.
+
+% ============================================================
+\section{Problem Formulation}
+\label{sec:problem}
+% ============================================================
+
+\subsection{Multiple Instance Learning}
+
+Let $\mathcal{D} = \{(B_i, y_i)\}_{i=1}^{N}$ denote a dataset of $N$ patients,
+where $y_i \in \{0, 1\}$ is the binary patient-level label and
+$B_i = \{\mathbf{x}_{i,1}, \ldots, \mathbf{x}_{i,K_i}\}$ is the corresponding
+\emph{bag} of $K_i$ patch embeddings, with
+$\mathbf{x}_{i,k} \in \mathbb{R}^{d}$.
+
+Under the standard MIL assumption, the bag label is observed but instance
+labels are latent. The primary MIL assumption used here is the \emph{collective}
+(or embedding-space) variant~\cite{carbonneau2018}: the bag-level representation
+is obtained by aggregating instance embeddings, and the classifier operates on this
+aggregate:
+\begin{equation}
+  \hat{y}_i = f_\theta\!\left(\phi\!\left(\{\mathbf{x}_{i,k}\}_{k=1}^{K_i}\right)\right),
+\end{equation}
+where $\phi(\cdot)$ is the aggregation operator (LSTM, Transformer, pooling, etc.)
+and $f_\theta(\cdot)$ is a learned classifier parameterised by $\theta$.
+
+\subsection{Survival Prediction Endpoints}
+
+Two binary classification tasks are defined:
+\begin{align}
+  y^{\text{OS6}}_i  &= \mathbf{1}[\text{OS}_i \leq 6  \text{ months}], \\
+  y^{\text{OS24}}_i &= \mathbf{1}[\text{OS}_i \leq 24 \text{ months}],
+\end{align}
+where $\text{OS}_i$ is the overall survival time in months for patient $i$.
+These thresholds define clinically meaningful risk strata: OS6 separates patients
+with very poor short-term prognosis, while OS24 separates those who achieve
+longer-term disease control.
+
+% ============================================================
+\section{Dataset and Preprocessing}
+\label{sec:data}
+% ============================================================
+
+\subsection{Patient Cohort}
+
+The dataset consists of CT volumes from patients diagnosed with NSCLC or SCLC,
+collected from \emph{multiple clinical centres}. Each sample is represented as a
+dictionary containing:
+\begin{itemize}
+  \item \texttt{features}: a tensor of shape $[K, d]$ where $K \leq K_{\max}$ is the
+        number of patches and $d = 512$ is the embedding dimensionality;
+  \item \texttt{OS\_6} / \texttt{OS\_24}: the binary survival label;
+  \item \texttt{patient\_id}: a unique patient identifier;
+  \item \texttt{center}: the originating clinical centre, used for subgroup evaluation.
+\end{itemize}
+
+\subsection{Class Imbalance}
+
+The dataset exhibits mild class imbalance between the positive (short-survivor) and
+negative (long-survivor) classes. To mitigate this, an \emph{oversampling} strategy
+is applied to the minority class during training. The oversampling factor
+$\alpha \geq 1$ controls how many times each minority-class sample is replicated,
+yielding an effective training set size of:
+\begin{equation}
+  N_{\text{eff}} = N_{\text{maj}} + \alpha \cdot N_{\text{min}},
+\end{equation}
+where $N_{\text{maj}}$ and $N_{\text{min}}$ are the majority and minority class
+counts respectively. Additionally, the cross-entropy loss is optionally weighted
+by inverse class frequencies.
+
+\subsection{Dataset Splits}
+
+Data are split into training, validation, and test partitions. Two modes are
+supported:
+\begin{itemize}
+  \item \textbf{Random split}: a proportion $r_{\text{val}}$ (default 0.15) is held out
+        for validation and $r_{\text{test}}$ (default 0.15) for testing, with
+        stratification by label.
+  \item \textbf{Pre-split}: fixed \texttt{train\_set.pkl}, \texttt{val\_set.pkl},
+        and \texttt{test\_set.pkl} files are provided, enabling reproducible
+        multi-centre evaluation.
+\end{itemize}
+
+\subsection{Variable-Length Bags and Padding}
+
+Because patches are extracted from the actual extent of each CT volume, the bag
+size $K_i$ varies across patients. Bags are zero-padded to a common length
+$K_{\max} = 300$ for batched processing:
+\begin{equation}
+  \tilde{\mathbf{X}}_i \in \mathbb{R}^{K_{\max} \times d},
+  \quad
+  \tilde{\mathbf{X}}_i[k] =
+  \begin{cases}
+    \mathbf{x}_{i,k} & k \leq K_i, \\
+    \mathbf{0}        & k > K_i.
+  \end{cases}
+\end{equation}
+A binary padding mask $\mathbf{m}_i \in \{0,1\}^{K_{\max}}$ is derived
+post-projection by testing whether the $\ell^1$-norm of each token is non-zero:
+\begin{equation}
+  m_{i,k} = \mathbf{1}\!\left[\|\tilde{\mathbf{x}}_{i,k}\|_1 > 0\right].
+\end{equation}
+The mask is used to suppress padded positions in subsequent layers.
+
+% ============================================================
+\section{Patch Embedding Extraction}
+\label{sec:embeddings}
+% ============================================================
+
+\subsection{CT-FM Foundation Model}
+
+Each CT volume is partitioned into non-overlapping (or mildly overlapping)
+three-dimensional sub-volume crops. Every crop $\mathbf{v}_{i,k} \in \mathbb{R}^{H \times W \times D}$
+is encoded by \textbf{CT-FM}~\cite{ctfm}, a vision foundation model pretrained
+in a self-supervised manner on over 140{,}000 CT scans spanning all anatomical sites.
+CT-FM produces a fixed-dimensional embedding for each crop:
+\begin{equation}
+  \mathbf{x}_{i,k} = \text{CT-FM}(\mathbf{v}_{i,k}) \in \mathbb{R}^{512}.
+\end{equation}
+The encoder weights are \emph{frozen} during MIL training; the framework operates
+entirely in the embedding space produced by CT-FM.
+
+\subsection{Assumptions on the Embedding Space}
+
+\begin{enumerate}
+  \item \textbf{Semantic sufficiency}: CT-FM embeddings capture radiologically
+        meaningful variation (texture, morphology, attenuation patterns) at the local
+        patch level, sufficient for survival-relevant discrimination.
+  \item \textbf{Domain alignment}: despite being pretrained on a heterogeneous
+        multi-anatomy corpus, CT-FM features transfer effectively to the thoracic oncology domain.
+  \item \textbf{Patch independence} (at the encoder stage): each patch is encoded
+        independently; spatial context across patches is modelled exclusively by the
+        MIL aggregator.
+\end{enumerate}
+
+\subsection{Anatomical Ordering}
+
+Before being passed to the LSTM aggregator, patches within each bag are sorted
+by their anatomical position along the superior-inferior (Z) axis of the CT volume.
+This imposes a clinically grounded sequential structure: the model reads the thorax
+from apex to base, mirroring the typical radiologist inspection order and enabling
+the LSTM to exploit spatial continuity.
+
+% ============================================================
+\section{Model Architectures}
+\label{sec:models}
+% ============================================================
+
+All models share the same input interface: a padded bag tensor
+$\tilde{\mathbf{X}} \in \mathbb{R}^{B \times K_{\max} \times d}$ where $B$ is the
+batch size, and produce logits $\mathbf{z} \in \mathbb{R}^{B \times C}$ where
+$C = 2$ is the number of classes.
+
+% ------------------------------------------------------------
+\subsection{LSTM-Based MIL (Primary Model)}
+\label{sec:lstm}
+% ------------------------------------------------------------
+
+\subsubsection{Motivation}
+
+The LSTM-based MIL model treats the ordered sequence of patch embeddings as a
+\emph{temporal signal} to be processed recurrently. As the network scans the
+volume from apex to base, the LSTM hidden state acts as a \textbf{running risk
+accumulator}: each new patch updates the memory in proportion to the local lesion
+signal it carries, and the final (or attention-weighted) hidden state represents
+the \emph{cumulative tumour burden} integrated over the entire volume. This
+inductive bias is well-matched to the spatial continuity of lung tumours, which
+typically manifest as contiguous lesions whose full extent spans multiple
+anatomical levels.
+
+\subsubsection{Feature Projection}
+
+The input embeddings are first projected into a lower-dimensional model space:
+\begin{equation}
+  \mathbf{H}^{(0)} = \tilde{\mathbf{X}} \,\mathbf{W}_{\text{proj}} + \mathbf{b}_{\text{proj}},
+  \quad
+  \mathbf{W}_{\text{proj}} \in \mathbb{R}^{d \times d_h},
+\end{equation}
+yielding $\mathbf{H}^{(0)} \in \mathbb{R}^{B \times K_{\max} \times d_h}$ where
+$d_h$ is the hidden dimension (default $d_h = 128$).
+
+\subsubsection{Bidirectional LSTM}
+
+The projected sequence is processed by an $L$-layer bidirectional LSTM
+(default $L = 2$). At each layer $\ell$ and each time step $k$, the LSTM
+cell computes:
+\begin{align}
+  \mathbf{f}_k^{(\ell)} &= \sigma\!\left(\mathbf{W}_f \mathbf{h}_{k-1}^{(\ell)} + \mathbf{U}_f \mathbf{h}_k^{(\ell-1)} + \mathbf{b}_f\right), \label{eq:forget}\\
+  \mathbf{i}_k^{(\ell)} &= \sigma\!\left(\mathbf{W}_i \mathbf{h}_{k-1}^{(\ell)} + \mathbf{U}_i \mathbf{h}_k^{(\ell-1)} + \mathbf{b}_i\right), \label{eq:input}\\
+  \mathbf{o}_k^{(\ell)} &= \sigma\!\left(\mathbf{W}_o \mathbf{h}_{k-1}^{(\ell)} + \mathbf{U}_o \mathbf{h}_k^{(\ell-1)} + \mathbf{b}_o\right), \label{eq:output}\\
+  \tilde{\mathbf{c}}_k^{(\ell)} &= \tanh\!\left(\mathbf{W}_c \mathbf{h}_{k-1}^{(\ell)} + \mathbf{U}_c \mathbf{h}_k^{(\ell-1)} + \mathbf{b}_c\right), \label{eq:cell_cand}\\
+  \mathbf{c}_k^{(\ell)} &= \mathbf{f}_k^{(\ell)} \odot \mathbf{c}_{k-1}^{(\ell)} + \mathbf{i}_k^{(\ell)} \odot \tilde{\mathbf{c}}_k^{(\ell)}, \label{eq:cell}\\
+  \mathbf{h}_k^{(\ell)} &= \mathbf{o}_k^{(\ell)} \odot \tanh\!\left(\mathbf{c}_k^{(\ell)}\right), \label{eq:hidden}
+\end{align}
+where $\sigma(\cdot)$ is the sigmoid function, $\odot$ denotes element-wise
+multiplication, and the superscript $(\ell)$ indexes the layer.
+
+The gates in \cref{eq:forget,eq:input,eq:output,eq:cell_cand,eq:cell,eq:hidden}
+embody the \emph{risk accumulation} interpretation:
+\begin{itemize}
+  \item The \textbf{forget gate} $\mathbf{f}_k$ decides how much of the accumulated
+        risk memory is preserved when transitioning from patch $k-1$ to patch $k$.
+        Anatomically uninformative patches (e.g., air, background) tend to induce
+        $\mathbf{f}_k \approx \mathbf{1}$, preserving prior risk context unchanged.
+  \item The \textbf{input gate} $\mathbf{i}_k$ controls the fraction of the new
+        patch's risk signal $\tilde{\mathbf{c}}_k$ that is written into memory,
+        effectively weighting the local pathological signal of each slice.
+  \item The \textbf{cell state} $\mathbf{c}_k$ is the risk accumulator: it integrates
+        patch-level signals across the full longitudinal extent of the volume, allowing
+        the model to capture multi-level lesion distributions.
+\end{itemize}
+
+Because the LSTM is \textbf{bidirectional}, two LSTM chains are run:
+one in the anatomical order (apex $\to$ base) and one in reverse
+(base $\to$ apex). Their outputs are concatenated at each time step:
+\begin{equation}
+  \mathbf{h}_k = \left[\overrightarrow{\mathbf{h}}_k \,\Big\|\, \overleftarrow{\mathbf{h}}_k\right]
+  \in \mathbb{R}^{2 d_h},
+\end{equation}
+where $\|\cdot\|$ denotes concatenation. This yields the full sequence of
+hidden states $\mathbf{H} = [\mathbf{h}_1, \ldots, \mathbf{h}_{K_{\max}}]
+\in \mathbb{R}^{B \times K_{\max} \times 2d_h}$.
+
+\subsubsection{Padding Masking and Layer Normalisation}
+
+The padding mask is applied to suppress the hidden states of padded positions:
+\begin{equation}
+  \hat{\mathbf{h}}_k = m_k \cdot \mathbf{h}_k,
+\end{equation}
+ensuring that zero-padded inputs do not contaminate the aggregated representation.
+Layer normalisation is then applied across the feature dimension:
+\begin{equation}
+  \bar{\mathbf{h}}_k = \text{LayerNorm}(\hat{\mathbf{h}}_k).
+\end{equation}
+
+\subsubsection{Attention-Based Pooling}
+
+To aggregate the sequence of normalised hidden states into a single bag-level
+vector, an additive attention mechanism is applied. For each token
+$\bar{\mathbf{h}}_k$, an unnormalised attention score is computed:
+\begin{equation}
+  u_k = \mathbf{w}_2^\top \tanh\!\left(\mathbf{W}_1 \bar{\mathbf{h}}_k + \mathbf{b}_1\right),
+  \quad
+  \mathbf{W}_1 \in \mathbb{R}^{d_h \times 2d_h},\;
+  \mathbf{w}_2 \in \mathbb{R}^{d_h},
+\end{equation}
+and then normalised via softmax over the $K_{\max}$ positions:
+\begin{equation}
+  \alpha_k = \frac{\exp(u_k)}{\sum_{j=1}^{K_{\max}} \exp(u_j)},
+  \quad k = 1, \ldots, K_{\max}.
+\end{equation}
+The bag-level context vector is the attention-weighted sum of hidden states:
+\begin{equation}
+  \mathbf{z}_{\text{bag}} = \sum_{k=1}^{K_{\max}} \alpha_k \,\bar{\mathbf{h}}_k \;\in\; \mathbb{R}^{2d_h}.
+\end{equation}
+The weights $\{\alpha_k\}$ are interpretable as patch-level importance scores;
+they indicate which anatomical sub-volumes contributed most to the final
+prediction and can be used for spatial localisation of risk-relevant regions.
+
+When the attention module is disabled, global average pooling over non-padded
+positions is used instead:
+\begin{equation}
+  \mathbf{z}_{\text{bag}} = \frac{1}{\sum_k m_k} \sum_{k=1}^{K_{\max}} m_k \,\bar{\mathbf{h}}_k.
+\end{equation}
+
+\subsubsection{Classifier Head}
+
+The bag-level vector is passed through a two-layer MLP with intermediate
+LayerNorm and GELU activation:
+\begin{align}
+  \mathbf{r} &= \text{Dropout}\!\left(\text{GELU}\!\left(\text{LayerNorm}\!\left(\mathbf{W}_3 \,\mathbf{z}_{\text{bag}} + \mathbf{b}_3\right)\right)\right),
+  \quad \mathbf{W}_3 \in \mathbb{R}^{d_h \times 2d_h}, \\
+  \mathbf{z} &= \mathbf{W}_4 \,\mathbf{r} + \mathbf{b}_4,
+  \quad \mathbf{W}_4 \in \mathbb{R}^{C \times d_h},
+\end{align}
+producing unnormalised logits $\mathbf{z} \in \mathbb{R}^C$.
+A final dropout is applied to $\mathbf{z}_{\text{bag}}$ before the first linear
+layer to regularise the bag-level representation.
+
+\subsubsection{Full Forward Pass Summary}
+
+\begin{equation}
+\boxed{
+  \hat{y} = \arg\max_c \left[\mathbf{W}_4\,\text{GELU}\!\left(\text{LN}\!\left(\mathbf{W}_3 \sum_k \alpha_k\,\text{LN}\!\left(\text{BiLSTM}\!\left(\mathbf{W}_{\text{proj}}\,\tilde{\mathbf{X}}\right)\right)_k\right)\right)\right]_c
+}
+\end{equation}
+
+\subsubsection{Weight Initialisation}
+
+Linear layers (excluding LSTM internals) are initialised with Kaiming normal
+initialisation~\cite{he2015}:
+\begin{equation}
+  W_{ij} \sim \mathcal{N}\!\left(0,\, \frac{2}{n_{\text{in}}}\right),
+\end{equation}
+where $n_{\text{in}}$ is the fan-in of the layer. Bias parameters are
+initialised to zero. LSTM weights are left at their PyTorch defaults
+(uniform initialisation scaled by $1/\sqrt{n_{\text{hidden}}}$).
+
+% ------------------------------------------------------------
+\subsection{Transformer-Based MIL}
+\label{sec:transformer}
+% ------------------------------------------------------------
+
+The Transformer variant treats the patch sequence as a \emph{set} (order-invariant
+by design, but equipped with learned positional encodings to optionally capture
+spatial structure).
+
+\paragraph{Feature Projection and Positional Encoding.}
+Input embeddings are projected and augmented with a learned positional encoding
+$\mathbf{P} \in \mathbb{R}^{K_{\max} \times d_h}$:
+\begin{equation}
+  \mathbf{H}^{(0)}_k = \mathbf{W}_{\text{proj}}\,\mathbf{x}_k + \mathbf{P}_k.
+\end{equation}
+
+\paragraph{Transformer Encoder.}
+$L$ standard Transformer encoder layers are applied, each consisting of
+multi-head self-attention (MHSA) and a feed-forward network (FFN):
+\begin{align}
+  \mathbf{A}^{(\ell)} &= \text{MHSA}\!\left(\mathbf{H}^{(\ell-1)}\right) + \mathbf{H}^{(\ell-1)}, \\
+  \mathbf{H}^{(\ell)} &= \text{FFN}\!\left(\text{LN}(\mathbf{A}^{(\ell)})\right) + \text{LN}(\mathbf{A}^{(\ell)}),
+\end{align}
+where MHSA with $n_h$ heads computes:
+\begin{equation}
+  \text{MHSA}(\mathbf{H}) = \text{Concat}(\text{head}_1, \ldots, \text{head}_{n_h})\,\mathbf{W}^O,
+  \quad
+  \text{head}_j = \text{Softmax}\!\left(\frac{\mathbf{Q}_j\mathbf{K}_j^\top}{\sqrt{d_k}}\right)\mathbf{V}_j,
+\end{equation}
+with $\mathbf{Q}_j = \mathbf{H}\mathbf{W}_j^Q$, $\mathbf{K}_j = \mathbf{H}\mathbf{W}_j^K$,
+$\mathbf{V}_j = \mathbf{H}\mathbf{W}_j^V$, and $d_k = d_h / n_h$.
+The FFN uses GELU activation with a bottleneck factor of 2: $\text{FFN}(\mathbf{x}) = \mathbf{W}_2\,\text{GELU}(\mathbf{W}_1\,\mathbf{x})$.
+
+\paragraph{Cross-Attention Pooling.}
+A global query vector is formed by mean-pooling the encoder output, then used as
+the query in a cross-attention operation:
+\begin{equation}
+  \mathbf{q} = \frac{1}{K}\sum_{k=1}^{K} \mathbf{H}^{(L)}_k,
+  \quad
+  \mathbf{z}_{\text{bag}}, \boldsymbol{\alpha} = \text{MHSA}(\mathbf{q}, \mathbf{H}^{(L)}, \mathbf{H}^{(L)}).
+\end{equation}
+
+% ------------------------------------------------------------
+\subsection{Convolutional MIL}
+\label{sec:conv}
+% ------------------------------------------------------------
+
+The convolutional variant treats the patch dimension as a spatial axis and
+applies 1-D convolutions to model local patch neighbourhoods.
+
+\paragraph{Patch Attention.}
+Each patch embedding is scored by a 1-D convolutional attention layer.
+The feature vector of patch $k$ is treated as a single-channel 1-D signal of
+length $d$:
+\begin{equation}
+  s_k = \text{Conv1d}(\mathbf{x}_k) \in \mathbb{R},
+\end{equation}
+with masking of padded positions ($s_k \leftarrow -10^{10}$ for $m_k = 0$)
+before softmax normalisation:
+\begin{equation}
+  \alpha_k = \frac{\exp(s_k)}{\sum_{j} \exp(s_j)}.
+\end{equation}
+
+\paragraph{Weighted Aggregation and Group Pooling.}
+Attention-weighted patches $\hat{\mathbf{x}}_k = \alpha_k \mathbf{x}_k$ are
+aggregated into $G$ ordered groups of approximately equal size:
+\begin{equation}
+  \mathbf{g}_g = \sum_{k \in \mathcal{G}_g} \hat{\mathbf{x}}_k,
+  \quad g = 1, \ldots, G,
+\end{equation}
+where $\mathcal{G}_g = \{(g-1)\lceil K/G \rceil + 1, \ldots, \min(g\lceil K/G\rceil, K)\}$.
+Alternatively, the top-$G$ patches ranked by $\alpha_k$ can be selected directly.
+
+\paragraph{Convolutional Blocks.}
+The grouped features $\mathbf{G} \in \mathbb{R}^{B \times G \times d}$ are
+processed by a stack of residual 1-D ConvBlocks:
+\begin{equation}
+  \mathbf{G}^{(\ell+1)} = \text{ReLU}\!\left(\text{BN}\!\left(\text{Conv1d}(\mathbf{G}^{(\ell)})\right)\right) + \mathbf{W}_{\text{res}}\mathbf{G}^{(\ell)},
+\end{equation}
+followed by global average pooling over the group dimension and a two-layer
+MLP classifier.
+
+% ------------------------------------------------------------
+\subsection{Dense MIL}
+\label{sec:dense}
+% ------------------------------------------------------------
+
+The Dense MIL model uses the same patch attention and group aggregation as the
+convolutional variant, but replaces the 1-D ConvBlocks with fully connected
+DenseBlocks. The grouped feature matrix is flattened into a single vector:
+\begin{equation}
+  \mathbf{v} = \text{vec}(\mathbf{G}) \in \mathbb{R}^{G \cdot d},
+\end{equation}
+which is then passed through a configurable stack of residual DenseBlocks:
+\begin{equation}
+  \mathbf{v}^{(\ell+1)} = \sigma\!\left(\text{LN}\!\left(\mathbf{W}^{(\ell)}\mathbf{v}^{(\ell)}\right)\right) + \mathbf{W}_{\text{res}}^{(\ell)}\mathbf{v}^{(\ell)},
+\end{equation}
+where $\sigma$ is a configurable activation (ReLU, GELU, Leaky ReLU, or Tanh).
+A final linear layer maps the last hidden state to class logits.
+
+% ============================================================
+\section{Training Procedure}
+\label{sec:training}
+% ============================================================
+
+\subsection{Loss Function}
+
+All models are trained to minimise the class-weighted cross-entropy loss:
+\begin{equation}
+  \mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N} w_{y_i} \log p_{\theta}(y_i \mid B_i),
+\end{equation}
+where $p_{\theta}(y \mid B) = \text{Softmax}(\mathbf{z})_y$ and
+$w_c = N / (C \cdot N_c)$ are inverse-frequency class weights with $N_c$ samples
+in class $c$. When the dataset is only mildly imbalanced, equal weights
+($w_c = 1$) may also be used.
+
+\subsection{Optimiser}
+
+The AdamW optimiser~\cite{loshchilov2019} is used with decoupled weight decay:
+\begin{equation}
+  \boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_t
+    - \eta_t \left(\frac{\hat{\mathbf{m}}_t}{\sqrt{\hat{\mathbf{v}}_t} + \epsilon} + \lambda \boldsymbol{\theta}_t\right),
+\end{equation}
+where $\hat{\mathbf{m}}_t$ and $\hat{\mathbf{v}}_t$ are bias-corrected first and second
+moment estimates of the gradient, $\eta_t$ is the current learning rate,
+$\lambda$ is the weight decay coefficient, and $\epsilon$ is a numerical stability
+constant. Default hyperparameters: $\eta_0 = 10^{-4}$, $\lambda = 10^{-4}$,
+$\beta_1 = 0.9$, $\beta_2 = 0.999$.
+
+\subsection{Learning Rate Scheduling}
+
+A ReduceLROnPlateau scheduler monitors the validation loss and halves the
+learning rate if no improvement is observed for 5 consecutive epochs:
+\begin{equation}
+  \eta_{t+1} = \begin{cases}
+    \gamma \, \eta_t & \text{if no val. loss improvement for } p_{\text{sched}} \text{ epochs}, \\
+    \eta_t           & \text{otherwise},
+  \end{cases}
+\end{equation}
+with reduction factor $\gamma = 0.5$ and scheduler patience $p_{\text{sched}} = 5$.
+
+\subsection{Early Stopping}
+
+Training is halted if the primary selection metric does not improve for
+$p_{\text{stop}}$ consecutive epochs (default $p_{\text{stop}} = 10$).
+Two selection criteria are supported:
+\begin{itemize}
+  \item \textbf{F1 Macro} (primary): the macro-averaged F1 score over both classes.
+        Higher is better. This criterion is preferred because it is class-balanced and
+        more informative than accuracy under mild imbalance.
+  \item \textbf{Validation loss}: standard cross-entropy on the held-out set.
+        Lower is better.
+\end{itemize}
+The model state corresponding to the best observed metric value is restored
+at the end of training.
+
+\subsection{Regularisation}
+
+Multiple regularisation mechanisms are used to prevent overfitting:
+\begin{enumerate}
+  \item \textbf{Dropout}: applied after projections, within the LSTM (inter-layer),
+        inside the attention MLP, and before the classifier head.
+  \item \textbf{Weight decay}: L2 penalty on all non-bias parameters via AdamW.
+  \item \textbf{LayerNorm}: applied to LSTM outputs and intermediate classifier
+        activations to stabilise training and reduce internal covariate shift.
+  \item \textbf{Kaiming initialisation}: prevents vanishing/exploding gradients at
+        the start of training.
+\end{enumerate}
+
+% ============================================================
+\section{Evaluation Protocol}
+\label{sec:eval}
+% ============================================================
+
+\subsection{Performance Metrics}
+
+For each dataset split (train, validation, test), the following metrics are computed:
+\begin{align}
+  \text{Accuracy}  &= \frac{TP + TN}{TP + TN + FP + FN}, \\[4pt]
+  \text{Precision} &= \frac{TP}{TP + FP}, \\[4pt]
+  \text{Recall}    &= \frac{TP}{TP + FN}, \\[4pt]
+  \text{F1}        &= \frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}, \\[4pt]
+  \text{F1}_{\text{macro}} &= \frac{1}{C}\sum_{c=1}^{C} \text{F1}_c, \\[4pt]
+  \text{AUC}       &= \int_0^1 \text{TPR}(t)\, \mathrm{d}\,\text{FPR}(t),
+\end{align}
+where $TP$, $TN$, $FP$, $FN$ denote true positives, true negatives, false positives,
+and false negatives with respect to the positive (short-survivor) class.
+The AUC is computed from the soft probability scores output by the model.
+
+\subsection{Bootstrap Confidence Intervals}
+
+All reported metrics are accompanied by empirical 95\% confidence intervals (CI)
+computed via non-parametric bootstrap with $B = 1{,}000$ resamples. For a metric
+$M$ computed on the test set of size $n$:
+\begin{enumerate}
+  \item Draw $B$ bootstrap samples $\mathcal{S}_b = \{i_1, \ldots, i_n\}$
+        (with replacement) from $\{1, \ldots, n\}$.
+  \item Compute $M^{(b)}$ on each $\mathcal{S}_b$.
+  \item Report the $[\alpha/2, 1-\alpha/2]$ empirical percentiles of
+        $\{M^{(b)}\}_{b=1}^{B}$ as the CI, with $\alpha = 0.05$.
+\end{enumerate}
+
+\subsection{Cross-Validation}
+
+$k$-fold cross-validation (default $k = 5$) is supported for model selection and
+variance estimation. The dataset is partitioned into $k$ stratified folds;
+in each fold, one partition is held out for testing and the remainder is used for
+training and validation. Metrics are aggregated across folds as mean $\pm$ standard
+deviation.
+
+\subsection{Centre-Based Subgroup Evaluation}
+
+Because the dataset is collected from multiple clinical centres, performance is
+additionally evaluated per centre. For each centre $c$ with at least
+$n_{\min} = 10$ samples, all classification metrics are computed on the subset
+$\mathcal{D}_c = \{(B_i, y_i) : \text{center}_i = c\}$. Centre-level metrics
+are weighted by sample count to produce a grand average:
+\begin{equation}
+  \bar{M} = \frac{\sum_c |\mathcal{D}_c| \cdot M_c}{\sum_c |\mathcal{D}_c|}.
+\end{equation}
+This analysis exposes performance disparities driven by scanner heterogeneity,
+acquisition protocol differences, and institutional case-mix variation.
+
+% ============================================================
+\section{Key Modelling Assumptions}
+\label{sec:assumptions}
+% ============================================================
+
+We enumerate the primary assumptions underlying the framework and their
+clinical/technical justifications.
+
+\begin{enumerate}
+
+  \item \textbf{Bag-level supervision is sufficient.}
+        Patient-level binary labels (short vs.\ long survivor) are propagated to the
+        entire bag without patch-level annotation. This is the fundamental MIL
+        assumption: at least one (or collectively, the ensemble of) informative
+        patch(es) is responsible for the bag label. For survival prediction, this is
+        clinically plausible because the prognostically relevant signal (e.g., tumour
+        heterogeneity, necrosis, vascular invasion) is distributed across multiple
+        sub-volumes rather than localised to a single patch.
+
+  \item \textbf{CT-FM embeddings are a sufficient statistic for patch-level risk.}
+        The framework assumes that the 512-dimensional CT-FM embedding captures all
+        radiologically prognostic information available at the patch level.
+        Information not encoded by CT-FM (e.g., absolute Hounsfield values in the
+        raw volume outside the patch, patient demographics) is not accessible to the
+        MIL classifier. This motivates future work on multi-modal fusion.
+
+  \item \textbf{Zero-padding does not introduce spurious signals.}
+        Padded positions are represented as zero vectors $\mathbf{0} \in \mathbb{R}^d$.
+        After the feature projection, the mask $\mathbf{m}$ is computed on the
+        projected representation; any residual non-zero signal in padded positions
+        (due to the projection bias $\mathbf{b}_{\text{proj}}$) is explicitly
+        suppressed by mask multiplication. The attention softmax is also
+        implicitly biased away from padded tokens because their LSTM outputs are
+        zeroed before attention scoring.
+
+  \item \textbf{Anatomical ordering is meaningful for the LSTM.}
+        The superior-to-inferior ordering of patches is assumed to be the most
+        clinically informative ordering for the LSTM, reflecting the continuous
+        spatial extent of the tumour along the cranio-caudal axis. This is a
+        \emph{strong inductive bias}: it implies that adjacent patches share
+        anatomical context and that the temporal dependencies modelled by the
+        LSTM correspond to genuine spatial dependencies in the CT volume.
+        This assumption would break if patches were extracted non-contiguously or
+        from multiple anatomical sites without a clear ordering.
+
+  \item \textbf{Bidirectionality is beneficial.}
+        Processing the patch sequence in both directions is assumed to be
+        advantageous because prognostic signals may exist at any anatomical level,
+        and the reverse pass allows each hidden state to be informed by patches
+        that appear anatomically below it in the volume. The concatenation of
+        forward and backward states doubles the effective hidden dimension.
+
+  \item \textbf{Survival is a binary classification problem.}
+        The continuous time-to-event nature of overall survival is reduced to a
+        binary threshold problem. This discards censoring information and ignores
+        the time dimension beyond the threshold. For clinical deployment, a
+        survival regression or hazard estimation approach may be preferable.
+
+  \item \textbf{Multi-centre data follows a common feature distribution.}
+        Although data originate from different clinical centres (with potentially
+        different scanners, acquisition protocols, and reconstruction kernels),
+        CT-FM is assumed to produce embeddings that are sufficiently invariant to
+        these nuisances. Centre-based evaluation (\cref{sec:eval}) is performed
+        specifically to audit this assumption.
+
+\end{enumerate}
+
+% ============================================================
+\section{Hyperparameter Summary}
+\label{sec:hyperparams}
+% ============================================================
+
+\Cref{tab:hyperparams} summarises the default hyperparameters of the LSTM-based
+MIL model and the training procedure.
+
+\begin{table}[h]
+\centering
+\caption{Default hyperparameters for the LSTM-based MIL model and training.}
+\label{tab:hyperparams}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Default value} \\
+\midrule
+\multicolumn{3}{l}{\textit{Embedding}} \\
+Input embedding dimension     & $d$               & 512 \\
+Maximum patches per bag       & $K_{\max}$        & 300 \\
+\midrule
+\multicolumn{3}{l}{\textit{LSTM}} \\
+Hidden dimension              & $d_h$             & 128 \\
+Number of LSTM layers         & $L$               & 2 \\
+Bidirectional                 & ---               & Yes ($2d_h = 256$ output) \\
+Dropout (inter-layer)         & $p$               & 0.3 \\
+\midrule
+\multicolumn{3}{l}{\textit{Attention}} \\
+Attention hidden dimension    & $d_h / 2$         & 64 \\
+\midrule
+\multicolumn{3}{l}{\textit{Classifier}} \\
+Intermediate dimension        & $d_h$             & 128 \\
+Output classes                & $C$               & 2 \\
+\midrule
+\multicolumn{3}{l}{\textit{Training}} \\
+Optimiser                     & ---               & AdamW \\
+Learning rate                 & $\eta_0$          & $10^{-4}$ \\
+Weight decay                  & $\lambda$         & $10^{-4}$ \\
+LR reduction factor           & $\gamma$          & 0.5 \\
+Scheduler patience            & $p_{\text{sched}}$& 5 epochs \\
+Early stopping patience       & $p_{\text{stop}}$ & 10 epochs \\
+Maximum epochs                & $T_{\max}$        & 100 \\
+Batch size                    & $B$               & 32 \\
+Selection metric              & ---               & F1 Macro \\
+\midrule
+\multicolumn{3}{l}{\textit{Evaluation}} \\
+Bootstrap resamples           & $B_{\text{boot}}$ & 1{,}000 \\
+Confidence level              & ---               & 95\% \\
+Cross-validation folds        & $k$               & 5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+% ============================================================
+
+\subsection{The LSTM as a Spatial Risk Integrator}
+
+The core conceptual contribution of the LSTM-based MIL model is its explicit
+treatment of the CT volume as an ordered sequence of anatomical observations.
+Whereas attention-based MIL models~\cite{ilse2018} and transformer-based
+models treat the patch bag as an unordered set and learn permutation-invariant
+aggregations, the LSTM model imposes a spatial prior: lesion-relevant information
+accumulates progressively as the model traverses the volume from apex to base.
+
+The cell state $\mathbf{c}_k$ at step $k$ can be interpreted as the model's
+\emph{running estimate of cumulative risk} given all patches seen so far.
+The forget gate $\mathbf{f}_k$ learns to retain this estimate across anatomically
+benign regions, while the input gate $\mathbf{i}_k$ modulates the update magnitude
+in response to locally abnormal patches. The final attention-pooled representation
+$\mathbf{z}_{\text{bag}}$ thus synthesises spatial context from the entire volume
+in a way that respects the anatomical ordering of the patches.
+
+This architecture is particularly well-suited to predicting overall survival
+in lung cancer, where the prognostic signal arises from the interplay of
+tumour burden across multiple lobes, mediastinal involvement, and the regional
+extent of disease --- all of which are spatially distributed phenomena.
+
+\subsection{Comparison of Aggregation Strategies}
+
+The framework includes four complementary aggregation strategies:
+\begin{itemize}
+  \item \textbf{LSTM}: exploits sequential structure; captures long-range
+        anatomical dependencies; $\mathcal{O}(K \cdot d_h)$ memory per sample.
+  \item \textbf{Transformer}: permutation-invariant; captures all pairwise
+        patch interactions; $\mathcal{O}(K^2)$ self-attention cost.
+  \item \textbf{Convolutional}: captures local patch-neighbourhood structure;
+        efficient; limited long-range modelling capacity.
+  \item \textbf{Dense}: no spatial structure assumed beyond group aggregation;
+        simplest inductive bias; highest risk of overfitting on small datasets.
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+  \item \textbf{Censoring}: binary thresholding of OS discards censored observations
+        and the temporal dimension of survival data.
+  \item \textbf{Fixed encoder}: the CT-FM backbone is frozen; joint fine-tuning
+        may improve task-specific feature alignment at the cost of increased
+        compute and overfitting risk on small cohorts.
+  \item \textbf{Patch ordering sensitivity}: the LSTM's performance depends on a
+        consistent and clinically meaningful patch ordering; inconsistencies in
+        patch extraction across centres could degrade performance.
+  \item \textbf{No explicit anatomical localisation}: the framework does not
+        enforce tumour-centred patch extraction; the model must learn to attend to
+        relevant regions from weakly supervised signal alone.
+\end{itemize}
+
+% ============================================================
+\section*{References}
+% ============================================================
+
+\begin{thebibliography}{9}
+
+\bibitem{carbonneau2018}
+M.-A.\ Carbonneau, V.\ Cheplygina, E.\ Granger, and G.\ Gagnon,
+``Multiple instance learning: A survey of problem characteristics and applications,''
+\textit{Pattern Recognition}, vol.\ 77, pp.\ 329--353, 2018.
+
+\bibitem{ilse2018}
+M.\ Ilse, J.\ M.\ Tomczak, and M.\ Welling,
+``Attention-based deep multiple instance learning,''
+in \textit{Proc.\ ICML}, 2018.
+
+\bibitem{he2015}
+K.\ He, X.\ Zhang, S.\ Ren, and J.\ Sun,
+``Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification,''
+in \textit{Proc.\ ICCV}, 2015.
+
+\bibitem{loshchilov2019}
+I.\ Loshchilov and F.\ Hutter,
+``Decoupled weight decay regularization,''
+in \textit{Proc.\ ICLR}, 2019.
+
+\bibitem{ctfm}
+CT-FM: A Foundation Model for CT Imaging,
+pretrained on $>$140{,}000 CT scans from all anatomical sites.
+
+\end{thebibliography}
+
+\end{document}
